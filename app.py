@@ -1,4 +1,6 @@
 import os
+from typing import Any
+
 from flask import Flask, jsonify, Response
 import folium
 import requests
@@ -21,6 +23,42 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
     return response
+
+
+def asteroid_energy(mass_kg, velocity_kmh):
+    """
+    Calculate kinetic energy of an asteroid in Joules.
+    """
+    velocity_m_s = velocity_kmh / 3.6  # convert km/h to m/s
+    energy_joules = 0.5 * mass_kg * velocity_m_s ** 2
+    return energy_joules
+
+
+def tsunami_size(mass_kg, velocity_kmh, diameter_m):
+    #    wave height and tsunami radius
+
+    energy_joules = asteroid_energy(mass_kg, velocity_kmh)
+    initial_wave_height = 0.2 * (energy_joules / 9810) ** 0.25  # 9810 = g*area fudge factor
+    diameter_km = diameter_m / 1000
+    tsunami_radius = 500 * diameter_km  # very rough estimate
+
+    return initial_wave_height, tsunami_radius
+
+def earthquake_size(mass_kg, velocity_kmh):
+    # M = 2/3logu10(E) - 3.2
+    energy_joules: float | Any=asteroid_energy(mass_kg, velocity_kmh)
+    magnitude = (2 / 3) * math.log10(energy_joules) - 3.2
+    radius_km = 10 ** (magnitude-3)/1.5
+    return radius_km, magnitude
+
+
+# Example usage
+# mass = 1e9  # kg
+# velocity = 50000  # km/h
+# diameter = 200  # m
+#
+# wave_height, radius = tsunami_size(mass, velocity, diameter)
+# print(f"Tsunami initial height: {wave_height:.2f} m, radius: {radius:.2f} m")
 
 
 # --- Asteroid generator ---
@@ -73,7 +111,8 @@ def generate_asteroids():
                                 "assumed_density_kg_m3": assumed_density,
                                 "miss_distance_km": miss_distance_km,
                                 "date": date_key,
-                                "is_hazardous": True
+                                "is_hazardous": True,
+                                "velocity_kmh": float(ast["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"])
                             }
                             count += 1
                             yield asteroid_data
@@ -157,21 +196,17 @@ def index():
 
     var craterDiameter = selectedAsteroid.diameter * 20;
 
-    // Get velocity if available (in km/h), otherwise assume 25000 km/h typical for NEAs
     var velocity_kmh = selectedAsteroid.velocity_kmh || 25000;
     var velocity_m_s = velocity_kmh * 1000 / 3600; // convert to m/s
+    var mass = selectedAsteroid.mass_kg || (Math.pow(selectedAsteroid.diameter / 2, 3) * 2000 * 4/3 * Math.PI);
 
-    // Shockwave radius formula: proportional to cube root of kinetic energy
-    // KE = 0.5 * mass * velocity^2
-    var mass = selectedAsteroid.mass_kg || (Math.pow(selectedAsteroid.diameter / 2, 3) * 2000 * 4/3 * Math.PI); // fallback
+    // --- Shockwave ---
     var kineticEnergy = 0.5 * mass * velocity_m_s * velocity_m_s; // Joules
-
-    // Scale factor to convert energy to radius (meters) - tuned for visualization
     var shockwaveRadius = Math.pow(kineticEnergy, 1/3) * 0.05;
 
     var shockwave = L.circle(waypointLocation, {
         radius: shockwaveRadius,
-        color: '#f1c40f', // yellow
+        color: '#f1c40f',
         fillColor: '#f1c40f',
         fillOpacity: 0.2,
         weight: 2
@@ -180,10 +215,11 @@ def index():
     shockwave.bindPopup('SHOCKWAVE ZONE<br>' + 
         'Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
         'Extreme destruction and fires<br>' +
-        'Asteroid Mass: ' + (mass ? Number(mass).toExponential(2) + ' kg' : 'N/A') + 
-        '<br>Velocity: ' + velocity_kmh.toFixed(0) + ' km/h'
+        'Asteroid Mass: ' + Number(mass).toExponential(2) + ' kg<br>' +
+        'Velocity: ' + velocity_kmh.toFixed(0) + ' km/h'
     );
 
+    // --- Crater ---
     var crater = L.circle(waypointLocation, {
         radius: craterDiameter,
         color: 'black',
@@ -202,6 +238,25 @@ def index():
         'Lng: ' + waypointLocation.lng.toFixed(4)
     ).openPopup();
 
+    // --- Earthquake ---
+    // Using your Python formula: M = 2/3 log10(E) - 3.2, radius = 10^((M-3)/1.5)
+    var magnitude = (2/3) * Math.log10(kineticEnergy) - 3.2;
+    var earthquakeRadiusKm = Math.pow(10, (magnitude - 3)/1.5);
+    var earthquakeCircle = L.circle(waypointLocation, {
+        radius: earthquakeRadiusKm * 1000, // convert km to meters
+        color: '#e67e22',
+        fillColor: '#e67e22',
+        fillOpacity: 0.2,
+        weight: 2
+    }).addTo(map);
+
+    earthquakeCircle.bindPopup(
+        'EARTHQUAKE EFFECT<br>' +
+        'Magnitude: ' + magnitude.toFixed(2) + '<br>' +
+        'Affected Radius: ' + earthquakeRadiusKm.toFixed(2) + ' km'
+    );
+
+    // Cleanup marker
     if (waypointMarker) {
         map.removeLayer(waypointMarker);
         waypointMarker = null;
@@ -210,6 +265,7 @@ def index():
 
     document.getElementById('impact-btn').disabled = true;
 });
+
 
 
     fetch('/stream_asteroids').then(r=>{
