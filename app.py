@@ -88,9 +88,9 @@ def generate_asteroids():
                         if ast.get("close_approach_data"):
                             miss_distance_km = float(ast["close_approach_data"][0]["miss_distance"]["kilometers"])
 
-                            # Consider "really close" as less than 20 million km (lunar distance is ~384k km)
-                            # This is still very close in astronomical terms!
-                            if miss_distance_km < 20000000:
+                            # Relaxed filter: any hazardous asteroid within lunar orbit distance
+                            # Moon is ~384,400 km away, so let's use 100 million km to get more results
+                            if miss_distance_km < 100000000:
                                 asteroid_data = {
                                     "name": ast["name"],
                                     "diameter": ast["estimated_diameter"]["meters"]["estimated_diameter_max"],
@@ -428,10 +428,28 @@ def index():
     document.getElementById('impact-btn').addEventListener('click', function() {
         if (!selectedAsteroid || !waypointLocation) return;
 
-        // Calculate crater diameter: 20x the asteroid diameter
+        // Calculate crater diameter: 20x the asteroid diameter (in meters)
         var craterDiameter = selectedAsteroid.diameter * 20;
 
-        // Create black crater circle
+        // Calculate shockwave radius: asteroid diameter in km * 50 (converted to meters)
+        var asteroidDiameterKm = selectedAsteroid.diameter / 1000;
+        var shockwaveRadius = asteroidDiameterKm * 50 * 1000; // Convert back to meters
+        var shockwaveStrength = (asteroidDiameterKm * 0.5)^3
+
+        // Create shockwave circle (outer, semi-transparent red)
+        var shockwave = L.circle(waypointLocation, {
+            radius: shockwaveRadius,
+            color: '#ff4444',
+            fillColor: '#ff0000',
+            fillOpacity: 0.2,
+            weight: 2
+        });
+        shockwave.addTo(map);
+        shockwave.bindPopup('SHOCKWAVE ZONE<br>' + 
+            'Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
+            'Extreme destruction and fires.' + 'Strength: ' =);
+
+        // Create black crater circle (inner, solid black)
         var crater = L.circle(waypointLocation, {
             radius: craterDiameter,
             color: 'black',
@@ -444,8 +462,8 @@ def index():
             'Asteroid: ' + selectedAsteroid.name + '<br>' +
             'Asteroid Diameter: ' + selectedAsteroid.diameter.toFixed(2) + ' meters<br>' +
             'Crater Diameter: ' + craterDiameter.toFixed(2) + ' meters<br>' +
-            'Lat: ' + waypointLocation.lat.toFixed(4) + '<br>' +
-            'Lng: ' + waypointLocation.lng.toFixed(4)).openPopup();
+            'Shockwave Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
+            'Shockwave Strength: ' + shockwaveStrength
 
         // Remove waypoint marker
         if (waypointMarker) {
