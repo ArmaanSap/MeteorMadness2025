@@ -32,24 +32,20 @@ def generate_asteroids():
     print(f"=== STARTING ASTEROID SEARCH ===")
     print(f"API Key present: {NASA_API_KEY is not None and len(NASA_API_KEY) > 0}")
 
-    # Define date range - START FROM RECENT and go backwards (more likely to find data quickly)
-    # Search from 7 days ago back to 2015 (5 years of data should be plenty)
+    # Define date range - START FROM RECENT and go backwards
     end_date = datetime.date.today() - datetime.timedelta(days=7)
     start_date = datetime.date(2015, 1, 1)
 
-    # Start from the END and work backwards for faster results
     current_date = end_date
 
     print("Starting asteroid search with 1-minute timeout...")
 
     while current_date >= start_date and count < 20:
-        # Check timeout
         elapsed = time.time() - start_time
         if elapsed > timeout:
             print(f"Timeout reached after {count} asteroids ({elapsed:.1f}s)")
             break
 
-        # Get 7 days at a time, going backwards
         batch_start = max(current_date - datetime.timedelta(days=6), start_date)
 
         date_str_start = batch_start.strftime("%Y-%m-%d")
@@ -70,7 +66,6 @@ def generate_asteroids():
 
             data = r.json()
 
-            # Loop through each date in the response
             for date_key in data.get("near_earth_objects", {}):
                 if count >= 20 or time.time() - start_time > timeout:
                     break
@@ -82,14 +77,11 @@ def generate_asteroids():
                     if count >= 20 or time.time() - start_time > timeout:
                         break
 
-                    # Only collect hazardous asteroids
                     if ast.get("is_potentially_hazardous_asteroid") == True:
-                        # Get the closest approach distance
                         if ast.get("close_approach_data"):
                             miss_distance_km = float(ast["close_approach_data"][0]["miss_distance"]["kilometers"])
 
-                            # Relaxed filter: any hazardous asteroid within lunar orbit distance
-                            # Moon is ~384,400 km away, so let's use 100 million km to get more results
+                            # Relaxed filter: 100 million km
                             if miss_distance_km < 100000000:
                                 asteroid_data = {
                                     "name": ast["name"],
@@ -105,32 +97,27 @@ def generate_asteroids():
 
         except requests.exceptions.Timeout:
             print(f"Request timeout for {date_str_start}")
-            # Move to previous batch even on timeout
             current_date = batch_start - datetime.timedelta(days=1)
             continue
         except Exception as e:
             print(f"Error fetching data: {e}")
             import traceback
             traceback.print_exc()
-            # Move to previous batch even on error
             current_date = batch_start - datetime.timedelta(days=1)
             continue
 
-        # Stop if we have 20 asteroids or timeout
         if count >= 20 or time.time() - start_time > timeout:
             break
 
-        # Move to previous batch (going backwards in time)
         current_date = batch_start - datetime.timedelta(days=1)
 
     print(f"=== SEARCH COMPLETE: Found {count} asteroids in {time.time() - start_time:.1f}s ===")
 
 
+@app.route('/')
 def index():
-    # Create map
     m = folium.Map(location=[20, 0], zoom_start=2)
 
-    # Custom HTML/CSS/JS for sidebar and impact functionality
     custom_html = """
     <style>
     .sidebar {
@@ -225,13 +212,6 @@ def index():
         font-style: italic;
     }
 
-    .loading-text {
-        font-size: 14px;
-        color: #ecf0f1;
-        text-align: center;
-        padding: 20px;
-    }
-
     .status-text {
         font-size: 12px;
         color: #3498db;
@@ -269,20 +249,16 @@ def index():
 
     console.log('Starting asteroid fetch...');
 
-    // Set up event delegation on the asteroid list container
     document.getElementById('asteroid-list').addEventListener('click', function(e) {
-        // Find the clicked asteroid item
         var asteroidItem = e.target.closest('.asteroid-item');
         if (!asteroidItem) return;
 
         console.log('Clicked asteroid item');
 
-        // Remove previous selection
         document.querySelectorAll('.asteroid-item').forEach(function(i) {
             i.classList.remove('selected');
         });
 
-        // Select this one
         asteroidItem.classList.add('selected');
 
         var name = asteroidItem.getAttribute('data-name');
@@ -294,12 +270,9 @@ def index():
         };
 
         console.log('Selected asteroid:', selectedAsteroid);
-
-        // Enable impact button if waypoint exists
         updateImpactButton();
     });
 
-    // Stream asteroids as they arrive
     fetch('/stream_asteroids')
         .then(function(response) {
             console.log('Got response:', response.status);
@@ -325,12 +298,12 @@ def index():
 
                 buffer += decoder.decode(result.value, { stream: true });
                 const lines = buffer.split('\\n');
-                buffer = lines.pop(); // Keep incomplete line in buffer
+                buffer = lines.pop();
 
                 lines.forEach(function(line) {
                     if (line.trim().startsWith('data: ')) {
                         try {
-                            const jsonStr = line.substring(6); // Remove 'data: ' prefix
+                            const jsonStr = line.substring(6);
                             console.log('Received:', jsonStr);
                             const data = JSON.parse(jsonStr);
 
@@ -389,20 +362,16 @@ def index():
         }
     }
 
-    // Wait for map to load
     setTimeout(function() {
         for (var key in window) {
             if (window[key] instanceof L.Map) {
                 map = window[key];
 
-                // Add click handler for waypoint
                 map.on('click', function(e) {
-                    // Remove previous waypoint
                     if (waypointMarker) {
                         map.removeLayer(waypointMarker);
                     }
 
-                    // Add new waypoint
                     waypointLocation = e.latlng;
                     waypointMarker = L.marker(e.latlng, {
                         icon: L.icon({
@@ -424,19 +393,13 @@ def index():
         }
     }, 1000);
 
-    // Impact button handler
     document.getElementById('impact-btn').addEventListener('click', function() {
         if (!selectedAsteroid || !waypointLocation) return;
 
-        // Calculate crater diameter: 20x the asteroid diameter (in meters)
         var craterDiameter = selectedAsteroid.diameter * 20;
-
-        // Calculate shockwave radius: asteroid diameter in km * 50 (converted to meters)
         var asteroidDiameterKm = selectedAsteroid.diameter / 1000;
-        var shockwaveRadius = asteroidDiameterKm * 50 * 1000; // Convert back to meters
-        var shockwaveStrength = (asteroidDiameterKm * 0.5)^3
+        var shockwaveRadius = asteroidDiameterKm * 50 * 1000;
 
-        // Create shockwave circle (outer, semi-transparent red)
         var shockwave = L.circle(waypointLocation, {
             radius: shockwaveRadius,
             color: '#ff4444',
@@ -447,9 +410,8 @@ def index():
         shockwave.addTo(map);
         shockwave.bindPopup('SHOCKWAVE ZONE<br>' + 
             'Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
-            'Extreme destruction and fires.' + 'Strength: ' =);
+            'Extreme destruction and fires');
 
-        // Create black crater circle (inner, solid black)
         var crater = L.circle(waypointLocation, {
             radius: craterDiameter,
             color: 'black',
@@ -463,29 +425,27 @@ def index():
             'Asteroid Diameter: ' + selectedAsteroid.diameter.toFixed(2) + ' meters<br>' +
             'Crater Diameter: ' + craterDiameter.toFixed(2) + ' meters<br>' +
             'Shockwave Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
-            'Shockwave Strength: ' + shockwaveStrength
+            'Lat: ' + waypointLocation.lat.toFixed(4) + '<br>' +
+            'Lng: ' + waypointLocation.lng.toFixed(4)).openPopup();
 
-        // Remove waypoint marker
         if (waypointMarker) {
             map.removeLayer(waypointMarker);
             waypointMarker = null;
             waypointLocation = null;
         }
 
-        // Keep asteroid selected but disable button until new waypoint is placed
         document.getElementById('impact-btn').disabled = true;
     });
     </script>
     """
 
     m.get_root().html.add_child(folium.Element(custom_html))
-
     return m._repr_html_()
 
 
+@app.route('/stream_asteroids')
 def stream_asteroids():
     """Stream asteroids as they are found using Server-Sent Events."""
-
     def generate():
         try:
             yield 'data: {"status": "Searching for hazardous asteroids..."}\n\n'
@@ -493,13 +453,11 @@ def stream_asteroids():
             found_any = False
             for asteroid in generate_asteroids():
                 found_any = True
-                # Send asteroid data
                 yield f'data: {json.dumps({"asteroid": asteroid})}\n\n'
 
             if not found_any:
                 yield 'data: {"error": "No asteroids found in search"}\n\n'
 
-            # Send completion message
             yield 'data: {"complete": true}\n\n'
         except Exception as e:
             print(f"Error in stream_asteroids: {e}")
@@ -510,15 +468,12 @@ def stream_asteroids():
     return Response(generate(), mimetype='text/event-stream')
 
 
-# Debug endpoint
 @app.route('/test_api')
 def test_api():
     """Test endpoint to verify API is working."""
     try:
-        # Test a single request
         test_date = "2024-09-01"
         url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={test_date}&end_date={test_date}&api_key={NASA_API_KEY}"
-
         r = requests.get(url, timeout=10)
 
         return jsonify({
@@ -535,9 +490,7 @@ def test_api():
         })
 
 
-# Add routes
-app.add_url_rule('/', 'index', index)
-app.add_url_rule('/stream_asteroids', 'stream_asteroids', stream_asteroids)
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Use PORT environment variable for Render, default to 5000 for local
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
