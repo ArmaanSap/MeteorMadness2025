@@ -35,30 +35,20 @@ def asteroid_energy(mass_kg, velocity_kmh):
 
 
 def tsunami_size(mass_kg, velocity_kmh, diameter_m):
-    #    wave height and tsunami radius
-
+    """Calculate wave height and tsunami radius"""
     energy_joules = asteroid_energy(mass_kg, velocity_kmh)
-    initial_wave_height = 0.2 * (energy_joules / 9810) ** 0.25  # 9810 = g*area fudge factor
+    initial_wave_height = 0.2 * (energy_joules / 9810) ** 0.25
     diameter_km = diameter_m / 1000
-    tsunami_radius = 500 * diameter_km  # very rough estimate
-
+    tsunami_radius = 500 * diameter_km
     return initial_wave_height, tsunami_radius
 
+
 def earthquake_size(mass_kg, velocity_kmh):
-    # M = 2/3logu10(E) - 3.2
-    energy_joules: float | Any=asteroid_energy(mass_kg, velocity_kmh)
+    """Calculate earthquake magnitude and radius"""
+    energy_joules = asteroid_energy(mass_kg, velocity_kmh)
     magnitude = (2 / 3) * math.log10(energy_joules) - 3.2
-    radius_km = 10 ** (magnitude-3)/1.5
+    radius_km = 10 ** (magnitude - 3) / 1.5
     return radius_km, magnitude
-
-
-# Example usage
-# mass = 1e9  # kg
-# velocity = 50000  # km/h
-# diameter = 200  # m
-#
-# wave_height, radius = tsunami_size(mass, velocity, diameter)
-# print(f"Tsunami initial height: {wave_height:.2f} m, radius: {radius:.2f} m")
 
 
 # --- Asteroid generator ---
@@ -99,7 +89,7 @@ def generate_asteroids():
                         if miss_distance_km < 100_000_000:
                             diameter = ast["estimated_diameter"]["meters"]["estimated_diameter_max"]
                             radius_m = diameter / 2.0
-                            volume_m3 = (4/3) * math.pi * (radius_m**3)
+                            volume_m3 = (4 / 3) * math.pi * (radius_m ** 3)
                             assumed_density = 2000.0
                             mass_kg = volume_m3 * assumed_density
 
@@ -112,7 +102,8 @@ def generate_asteroids():
                                 "miss_distance_km": miss_distance_km,
                                 "date": date_key,
                                 "is_hazardous": True,
-                                "velocity_kmh": float(ast["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"])
+                                "velocity_kmh": float(
+                                    ast["close_approach_data"][0]["relative_velocity"]["kilometers_per_hour"])
                             }
                             count += 1
                             yield asteroid_data
@@ -152,6 +143,7 @@ def index():
 
     <script>
     var selectedAsteroid=null, waypointMarker=null, waypointLocation=null, map=null, allAsteroids=[];
+
     document.getElementById('asteroid-list').addEventListener('click', function(e){
         var item=e.target.closest('.asteroid-item'); if(!item) return;
         document.querySelectorAll('.asteroid-item').forEach(i=>i.classList.remove('selected'));
@@ -159,17 +151,20 @@ def index():
         var name=item.getAttribute('data-name');
         var diameter=parseFloat(item.getAttribute('data-diameter'));
         var mass=parseFloat(item.getAttribute('data-mass'));
-        selectedAsteroid={name:name, diameter:diameter, mass_kg:mass};
+        var velocity=parseFloat(item.getAttribute('data-velocity'));
+        selectedAsteroid={name:name, diameter:diameter, mass_kg:mass, velocity_kmh:velocity};
         updateImpactButton();
     });
 
     function addAsteroid(ast){
         allAsteroids.push(ast);
         var massText=(ast.mass_kg!==undefined && ast.mass_kg!==null)?Number(ast.mass_kg).toExponential(2)+' kg':'N/A';
-        var html='<div class="asteroid-item" data-name="'+ast.name+'" data-diameter="'+ast.diameter+'" data-mass="'+ast.mass_kg+'">'+
-                 '<div>'+ast.name+'</div>'+
+        var velocityText=(ast.velocity_kmh!==undefined && ast.velocity_kmh!==null)?Number(ast.velocity_kmh).toFixed(0)+' km/h':'N/A';
+        var html='<div class="asteroid-item" data-name="'+ast.name+'" data-diameter="'+ast.diameter+'" data-mass="'+ast.mass_kg+'" data-velocity="'+ast.velocity_kmh+'">'+
+                 '<div><strong>'+ast.name+'</strong></div>'+
                  '<div>Diameter: '+ast.diameter.toFixed(2)+' m</div>'+
                  '<div>Mass: '+massText+'</div>'+
+                 '<div>Velocity: '+velocityText+'</div>'+
                  '<div>Miss Dist: '+(ast.miss_distance_km/1000).toFixed(0)+'k km</div>'+
                  '<div>Date: '+ast.date+'</div>'+
                  '<span class="hazard-badge">HAZARDOUS</span></div>';
@@ -192,86 +187,152 @@ def index():
     }, 1000);
 
     document.getElementById('impact-btn').addEventListener('click', function() {
-    if (!selectedAsteroid || !waypointLocation) return;
+        if (!selectedAsteroid || !waypointLocation) return;
 
-    var craterDiameter = selectedAsteroid.diameter * 20;
+        var velocity_kmh = selectedAsteroid.velocity_kmh;
+        var mass_kg = selectedAsteroid.mass_kg;
+        var diameter_m = selectedAsteroid.diameter;
+        var velocity_m_s = velocity_kmh * 1000 / 3600;
+        var kineticEnergy = 0.5 * mass_kg * velocity_m_s * velocity_m_s; // Joules
 
-    var velocity_kmh = selectedAsteroid.velocity_kmh || 25000;
-    var velocity_m_s = velocity_kmh * 1000 / 3600; // convert to m/s
-    var mass = selectedAsteroid.mass_kg || (Math.pow(selectedAsteroid.diameter / 2, 3) * 2000 * 4/3 * Math.PI);
+        // --- TSUNAMI (only if water) ---
+        function is_water(lat, lng) {
+            // Simplified water detection - checks if likely ocean
+            return (lat < 60 && lat > -60); // rough "mostly ocean" simplification
+        }
 
-    // --- Shockwave ---
-    var kineticEnergy = 0.5 * mass * velocity_m_s * velocity_m_s; // Joules
-    var shockwaveRadius = Math.pow(kineticEnergy, 1/3) * 0.05;
+        if (is_water(waypointLocation.lat, waypointLocation.lng)) {
+            var rho = 1000; // water density kg/m^3
+            var g = 9.81;
+            var k = 0.18; // scaling factor
+            var initial_wave_height = k * Math.pow(kineticEnergy / (rho * g), 0.25);
+            var tsunami_radius_km = 500 * (diameter_m / 1000);
 
-    var shockwave = L.circle(waypointLocation, {
-        radius: shockwaveRadius,
-        color: '#f1c40f',
-        fillColor: '#f1c40f',
-        fillOpacity: 0.2,
-        weight: 2
-    }).addTo(map);
+            var tsunamiCircle = L.circle(waypointLocation, {
+                radius: tsunami_radius_km * 1000,
+                color: '#3498db',
+                fillColor: '#3498db',
+                fillOpacity: 0.15,
+                weight: 2,
+                dashArray: '10, 10',
+                interactive: true
+            }).addTo(map);
 
-    shockwave.bindPopup('SHOCKWAVE ZONE<br>' + 
-        'Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
-        'Extreme destruction and fires<br>' +
-        'Asteroid Mass: ' + Number(mass).toExponential(2) + ' kg<br>' +
-        'Velocity: ' + velocity_kmh.toFixed(0) + ' km/h'
-    );
+            tsunamiCircle.bindPopup(
+                '<strong>TSUNAMI ZONE</strong><br>' +
+                'Initial Wave Height: ' + initial_wave_height.toFixed(2) + ' m<br>' +
+                'Affected Radius: ' + tsunami_radius_km.toFixed(2) + ' km<br>' +
+                '(Impact in ocean)'
+            );
+        }
 
-    // --- Crater ---
-    var crater = L.circle(waypointLocation, {
-        radius: craterDiameter,
-        color: 'black',
-        fillColor: '#000000',
-        fillOpacity: 1,
-        weight: 3
-    }).addTo(map);
+        // --- SEISMIC ACTIVITY ZONES ---
+        var magnitude = (2/3) * Math.log10(kineticEnergy) - 3.2;
+        var strongShakingRadius = Math.pow(10, 0.5 * magnitude - 2.0);
+        var lightShakingRadius = Math.pow(10, 0.5 * magnitude - 0.8);
+        var moderateShakingRadius = Math.pow(10, 0.5 * magnitude - 1.3);
 
-    crater.bindPopup(
-        'IMPACT CRATER<br>' +
-        'Asteroid: ' + selectedAsteroid.name + '<br>' +
-        'Asteroid Diameter: ' + selectedAsteroid.diameter.toFixed(2) + ' meters<br>' +
-        'Crater Diameter: ' + craterDiameter.toFixed(2) + ' meters<br>' +
-        'Shockwave Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
-        'Lat: ' + waypointLocation.lat.toFixed(4) + '<br>' +
-        'Lng: ' + waypointLocation.lng.toFixed(4)
-    ).openPopup();
+        // Perceptible seismic zone removed as per requirements
 
-    // --- Earthquake ---
-    // Using your Python formula: M = 2/3 log10(E) - 3.2, radius = 10^((M-3)/1.5)
-    var magnitude = (2/3) * Math.log10(kineticEnergy) - 3.2;
-    var earthquakeRadiusKm = Math.pow(10, (magnitude - 3)/1.5);
-    var earthquakeCircle = L.circle(waypointLocation, {
-        radius: earthquakeRadiusKm * 1000, // convert km to meters
-        color: '#e67e22',
-        fillColor: '#e67e22',
-        fillOpacity: 0.2,
-        weight: 2
-    }).addTo(map);
+        var lightSeismic = L.circle(waypointLocation, {
+            radius: lightShakingRadius * 1000,
+            color: '#e67e22',
+            fillColor: '#e67e22',
+            fillOpacity: 0.12,
+            weight: 1,
+            dashArray: '5, 5',
+            interactive: true
+        }).addTo(map);
+        lightSeismic.bindPopup(
+            '<strong>LIGHT SEISMIC ACTIVITY</strong><br>' +
+            'Magnitude: ' + magnitude.toFixed(2) + '<br>' +
+            'Radius: ' + lightShakingRadius.toFixed(2) + ' km<br>' +
+            'Intensity: MMI III-IV<br>' +
+            'Felt indoors, hanging objects swing, slight vibration'
+        );
 
-    earthquakeCircle.bindPopup(
-        'EARTHQUAKE EFFECT<br>' +
-        'Magnitude: ' + magnitude.toFixed(2) + '<br>' +
-        'Affected Radius: ' + earthquakeRadiusKm.toFixed(2) + ' km'
-    );
+        var moderateSeismic = L.circle(waypointLocation, {
+            radius: moderateShakingRadius * 1000,
+            color: '#d35400',
+            fillColor: '#d35400',
+            fillOpacity: 0.18,
+            weight: 2,
+            interactive: true
+        }).addTo(map);
+        moderateSeismic.bindPopup(
+            '<strong>MODERATE SEISMIC ACTIVITY</strong><br>' +
+            'Magnitude: ' + magnitude.toFixed(2) + '<br>' +
+            'Radius: ' + moderateShakingRadius.toFixed(2) + ' km<br>' +
+            'Intensity: MMI V-VI<br>' +
+            'Felt by all, furniture moves, weak structures damaged'
+        );
 
-    // Cleanup marker
-    if (waypointMarker) {
-        map.removeLayer(waypointMarker);
-        waypointMarker = null;
-        waypointLocation = null;
-    }
+        var strongSeismic = L.circle(waypointLocation, {
+            radius: strongShakingRadius * 1000,
+            color: '#c0392b',
+            fillColor: '#c0392b',
+            fillOpacity: 0.25,
+            weight: 2,
+            interactive: true
+        }).addTo(map);
+        strongSeismic.bindPopup(
+            '<strong>STRONG SEISMIC ACTIVITY</strong><br>' +
+            'Magnitude: ' + magnitude.toFixed(2) + '<br>' +
+            'Radius: ' + strongShakingRadius.toFixed(2) + ' km<br>' +
+            'Intensity: MMI VII+<br>' +
+            'Significant damage, buildings collapse, ground cracks'
+        );
 
-    document.getElementById('impact-btn').disabled = true;
-});
+        // --- SHOCKWAVE ---
+        var shockwaveRadius = Math.pow(kineticEnergy, 1/3) * 0.05;
+        var shockwave = L.circle(waypointLocation, {
+            radius: shockwaveRadius,
+            color: '#f1c40f',
+            fillColor: '#f1c40f',
+            fillOpacity: 0.2,
+            weight: 2,
+            interactive: true
+        }).addTo(map);
+        shockwave.bindPopup(
+            '<strong>SHOCKWAVE ZONE</strong><br>' + 
+            'Radius: ' + (shockwaveRadius / 1000).toFixed(2) + ' km<br>' +
+            'Extreme destruction and fires<br>' +
+            'Asteroid Mass: ' + mass_kg.toExponential(2) + ' kg<br>' +
+            'Velocity: ' + velocity_kmh.toFixed(0) + ' km/h'
+        );
 
+        // --- CRATER ---
+        var craterDiameter = diameter_m * 20;
+        var crater = L.circle(waypointLocation, {
+            radius: craterDiameter,
+            color: 'black',
+            fillColor: '#000000',
+            fillOpacity: 1,
+            weight: 3,
+            interactive: true
+        }).addTo(map);
+        crater.bindPopup(
+            '<strong>IMPACT CRATER</strong><br>' +
+            'Asteroid: ' + selectedAsteroid.name + '<br>' +
+            'Asteroid Diameter: ' + diameter_m.toFixed(2) + ' m<br>' +
+            'Crater Diameter: ' + craterDiameter.toFixed(2) + ' m<br>' +
+            'Impact Energy: ' + kineticEnergy.toExponential(2) + ' J<br>' +
+            'Lat: ' + waypointLocation.lat.toFixed(4) + '<br>' +
+            'Lng: ' + waypointLocation.lng.toFixed(4)
+        ).openPopup();
 
+        if (waypointMarker) {
+            map.removeLayer(waypointMarker);
+            waypointMarker = null;
+            waypointLocation = null;
+        }
+        document.getElementById('impact-btn').disabled = true;
+    });
 
     fetch('/stream_asteroids').then(r=>{
         const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer='';
         function processText(result){
-            if(result.done){document.getElementById('status-text').innerHTML='Stream complete'; return;}
+            if(result.done){document.getElementById('status-text').innerHTML='Stream complete. Found '+allAsteroids.length+' hazardous asteroids.'; return;}
             buffer+=decoder.decode(result.value,{stream:true});
             const lines=buffer.split('\\n'); buffer=lines.pop();
             lines.forEach(line=>{
@@ -302,6 +363,7 @@ def stream_asteroids():
         if not found_any:
             yield 'data: {"error":"No asteroids found"}\n\n'
         yield 'data: {"complete": true}\n\n'
+
     return Response(generate(), mimetype='text/event-stream')
 
 
@@ -312,9 +374,10 @@ def test_api():
         test_date = "2024-09-01"
         url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={test_date}&end_date={test_date}&api_key={NASA_API_KEY}"
         r = requests.get(url, timeout=10)
-        return jsonify({"status":"success", "api_key_present": bool(NASA_API_KEY), "response_code": r.status_code, "data_sample": r.json() if r.status_code==200 else r.text})
+        return jsonify({"status": "success", "api_key_present": bool(NASA_API_KEY), "response_code": r.status_code,
+                        "data_sample": r.json() if r.status_code == 200 else r.text})
     except Exception as e:
-        return jsonify({"status":"error","error":str(e),"api_key_present":bool(NASA_API_KEY)})
+        return jsonify({"status": "error", "error": str(e), "api_key_present": bool(NASA_API_KEY)})
 
 
 # --- Run app ---
