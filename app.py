@@ -13,6 +13,7 @@ app = Flask(__name__)
 
 NASA_API_KEY = os.getenv("NEO_API_KEY")
 
+
 # Add CORS headers for streaming
 @app.after_request
 def after_request(response):
@@ -61,12 +62,12 @@ def generate_asteroids():
         try:
             r = requests.get(url, timeout=10)
             print(f"API Response Status: {r.status_code}")
-            
+
             if r.status_code != 200:
                 print(f"API Error: {r.text}")
-                current_date = batch_end + datetime.timedelta(days=1)
+                current_date = batch_start - datetime.timedelta(days=1)
                 continue
-                
+
             data = r.json()
 
             # Loop through each date in the response
@@ -273,9 +274,9 @@ def index():
         // Find the clicked asteroid item
         var asteroidItem = e.target.closest('.asteroid-item');
         if (!asteroidItem) return;
-        
+
         console.log('Clicked asteroid item');
-        
+
         // Remove previous selection
         document.querySelectorAll('.asteroid-item').forEach(function(i) {
             i.classList.remove('selected');
@@ -283,15 +284,15 @@ def index():
 
         // Select this one
         asteroidItem.classList.add('selected');
-        
+
         var name = asteroidItem.getAttribute('data-name');
         var diameter = parseFloat(asteroidItem.getAttribute('data-diameter'));
-        
+
         selectedAsteroid = {
             name: name,
             diameter: diameter
         };
-        
+
         console.log('Selected asteroid:', selectedAsteroid);
 
         // Enable impact button if waypoint exists
@@ -300,7 +301,7 @@ def index():
 
     // Stream asteroids as they arrive
     fetch('/stream_asteroids')
-        .then(response => {
+        .then(function(response) {
             console.log('Got response:', response.status);
             if (!response.ok) {
                 throw new Error('Network response was not ok: ' + response.status);
@@ -309,8 +310,8 @@ def index():
             const decoder = new TextDecoder();
             let buffer = '';
 
-            function processText({ done, value }) {
-                if (done) {
+            function processText(result) {
+                if (result.done) {
                     console.log('Stream complete');
                     if (allAsteroids.length === 0) {
                         document.getElementById('status-text').innerHTML = 
@@ -322,17 +323,17 @@ def index():
                     return;
                 }
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
+                buffer += decoder.decode(result.value, { stream: true });
+                const lines = buffer.split('\\n');
                 buffer = lines.pop(); // Keep incomplete line in buffer
 
-                lines.forEach(line => {
+                lines.forEach(function(line) {
                     if (line.trim().startsWith('data: ')) {
                         try {
                             const jsonStr = line.substring(6); // Remove 'data: ' prefix
                             console.log('Received:', jsonStr);
                             const data = JSON.parse(jsonStr);
-                            
+
                             if (data.status) {
                                 document.getElementById('status-text').innerHTML = data.status;
                             } else if (data.asteroid) {
@@ -356,7 +357,7 @@ def index():
 
             return reader.read().then(processText);
         })
-        .catch(error => {
+        .catch(function(error) {
             console.error('Fetch error:', error);
             document.getElementById('status-text').innerHTML = 
                 '<span class="error-text">Error loading asteroids: ' + error.message + '</span>';
@@ -364,7 +365,7 @@ def index():
 
     function addAsteroid(ast) {
         allAsteroids.push(ast);
-        
+
         var hazardBadge = '<span class="hazard-badge">HAZARDOUS</span>';
         var asteroidHtml = '<div class="asteroid-item" data-diameter="' + ast.diameter + '" data-name="' + ast.name + '">' +
             '<div class="asteroid-name">' + ast.name + '</div>' +
@@ -373,30 +374,10 @@ def index():
             '<div class="asteroid-info">Date: ' + ast.date + '</div>' +
             hazardBadge +
             '</div>';
-        
+
         document.getElementById('asteroid-list').innerHTML += asteroidHtml;
         document.getElementById('status-text').innerHTML = 
             'Found ' + allAsteroids.length + ' asteroid' + (allAsteroids.length === 1 ? '' : 's') + '... searching...';
-        
-        // Add click handler to new item
-        var items = document.querySelectorAll('.asteroid-item');
-        var newItem = items[items.length - 1];
-        newItem.addEventListener('click', function() {
-            // Remove previous selection
-            document.querySelectorAll('.asteroid-item').forEach(function(i) {
-                i.classList.remove('selected');
-            });
-
-            // Select this one
-            this.classList.add('selected');
-            selectedAsteroid = {
-                name: this.getAttribute('data-name'),
-                diameter: parseFloat(this.getAttribute('data-diameter'))
-            };
-
-            // Enable impact button if waypoint exists
-            updateImpactButton();
-        });
     }
 
     function updateImpactButton() {
@@ -474,7 +455,6 @@ def index():
         }
 
         // Keep asteroid selected but disable button until new waypoint is placed
-        // Don't clear selectedAsteroid or remove selection styling
         document.getElementById('impact-btn').disabled = true;
     });
     </script>
@@ -487,19 +467,20 @@ def index():
 
 def stream_asteroids():
     """Stream asteroids as they are found using Server-Sent Events."""
+
     def generate():
         try:
             yield 'data: {"status": "Searching for hazardous asteroids..."}\n\n'
-            
+
             found_any = False
             for asteroid in generate_asteroids():
                 found_any = True
                 # Send asteroid data
                 yield f'data: {json.dumps({"asteroid": asteroid})}\n\n'
-            
+
             if not found_any:
                 yield 'data: {"error": "No asteroids found in search"}\n\n'
-            
+
             # Send completion message
             yield 'data: {"complete": true}\n\n'
         except Exception as e:
@@ -507,7 +488,7 @@ def stream_asteroids():
             import traceback
             traceback.print_exc()
             yield f'data: {json.dumps({"error": str(e)})}\n\n'
-    
+
     return Response(generate(), mimetype='text/event-stream')
 
 
@@ -519,9 +500,9 @@ def test_api():
         # Test a single request
         test_date = "2024-09-01"
         url = f"https://api.nasa.gov/neo/rest/v1/feed?start_date={test_date}&end_date={test_date}&api_key={NASA_API_KEY}"
-        
+
         r = requests.get(url, timeout=10)
-        
+
         return jsonify({
             "status": "success",
             "api_key_present": NASA_API_KEY is not None and len(NASA_API_KEY) > 0,
