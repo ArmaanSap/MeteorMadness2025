@@ -9,7 +9,10 @@ import datetime
 import json
 import time
 import math
-
+import rasterio
+import numpy as np
+from shapely.geometry import Point
+from shapely.geometry.polygon import Polygon
 load_dotenv()
 
 app = Flask(__name__)
@@ -46,14 +49,15 @@ def tsunami_size(mass_kg, velocity_kmh, diameter_m):
 def earthquake_size(mass_kg, velocity_kmh):
     """Calculate earthquake magnitude and radius"""
     energy_joules = asteroid_energy(mass_kg, velocity_kmh)
-    magnitude = (2 / 3) * math.log10(energy_joules) - 3.2
+    seismic_energy = (energy_joules)/1000
+    magnitude = (2 / 3) * math.log10(seismic_energy) - 3.2
     radius_km = 10 ** (magnitude - 3) / 1.5
     return radius_km, magnitude
 
 
 # --- Asteroid generator ---
 def generate_asteroids():
-    """Generator yielding hazardous asteroids with mass."""
+    #fetches  hazardous asteroids from NEO
     count = 0
     start_time = time.time()
     timeout = 60  # seconds
@@ -227,7 +231,7 @@ def index():
         }
 
         // --- SEISMIC ACTIVITY ZONES ---
-        var magnitude = (2/3) * Math.log10(kineticEnergy) - 3.2;
+        var magnitude = (2/3) * Math.log10(kineticEnergy/1000) - 3.2;
         var strongShakingRadius = Math.pow(10, 0.5 * magnitude - 2.0);
         var lightShakingRadius = Math.pow(10, 0.5 * magnitude - 0.8);
         var moderateShakingRadius = Math.pow(10, 0.5 * magnitude - 1.3);
@@ -302,7 +306,7 @@ def index():
         );
 
         // --- CRATER ---
-        var craterDiameter = diameter_m * 20;
+        var craterDiameter = diameter_m * 15;
         var crater = L.circle(waypointLocation, {
             radius: craterDiameter,
             color: 'black',
