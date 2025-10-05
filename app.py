@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from flask import Flask, jsonify, Response, request
+from flask import Flask, jsonify, Response, request, render_template_string
 import folium
 import requests
 from dotenv import load_dotenv
@@ -13,7 +13,7 @@ import rasterio
 from rasterio.transform import rowcol
 import numpy as np
 
-dataset = rasterio.open("data/gpw_v4_population_count_rev11_2020_30_sec.tif")
+dataset = rasterio.open("../data/gpw_v4_population_count_rev11_2020_30_sec.tif")
 
 load_dotenv()
 
@@ -217,9 +217,448 @@ def generate_asteroids():
         current_date = batch_start - datetime.timedelta(days=1)
 
 
-# --- Index route with folium map ---
+# --- Landing Page Route ---
 @app.route('/')
-def index():
+def landing():
+    landing_html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Asteroid Impactor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f1419 0%, #1a1f3a 50%, #0f1419 100%);
+            color: white;
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        .stars {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .star {
+            position: absolute;
+            background: white;
+            border-radius: 50%;
+            animation: twinkle 3s infinite;
+        }
+
+        @keyframes twinkle {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+            animation: fadeInDown 1s ease-out;
+        }
+
+        h1 {
+            font-size: 4rem;
+            background: linear-gradient(135deg, #667eea 0%, #e91e63 50%, #f06292 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .subtitle {
+            font-size: 1.3rem;
+            color: #b0b8c9;
+            font-weight: 300;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 60px;
+            animation: fadeInUp 1s ease-out 0.3s backwards;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, var(--card-color), transparent);
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            border-color: var(--card-color);
+        }
+
+        .stat-card.blue { --card-color: #667eea; }
+        .stat-card.orange { --card-color: #f59e0b; }
+        .stat-card.purple { --card-color: #9b59b6; }
+
+        .stat-icon {
+            font-size: 3rem;
+            margin-bottom: 15px;
+        }
+
+        .stat-value {
+            font-size: 3rem;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: var(--card-color);
+        }
+
+        .stat-label {
+            font-size: 1.1rem;
+            color: #b0b8c9;
+            font-weight: 500;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            margin-bottom: 30px;
+            text-align: center;
+            animation: fadeIn 1s ease-out 0.6s backwards;
+        }
+
+        .cta-container {
+            text-align: center;
+            margin: 60px 0;
+            animation: fadeIn 1s ease-out 0.9s backwards;
+        }
+
+        .cta-button {
+            display: inline-flex;
+            align-items: center;
+            gap: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px 50px;
+            font-size: 1.3rem;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            font-weight: bold;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .cta-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 15px 40px rgba(102, 126, 234, 0.6);
+        }
+
+        .asteroid-table-container {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+            animation: fadeInUp 1s ease-out 1.2s backwards;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            color: white;
+        }
+
+        thead {
+            background: rgba(102, 126, 234, 0.2);
+        }
+
+        th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #667eea;
+        }
+
+        td {
+            padding: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        tbody tr {
+            transition: background 0.2s ease;
+        }
+
+        tbody tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .hazard-badge {
+            display: inline-block;
+            background: #e74c3c;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 1.2rem;
+            color: #b0b8c9;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2.5rem;
+            }
+
+            .subtitle {
+                font-size: 1rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="stars" id="stars"></div>
+
+    <div class="container">
+        <header>
+            <h1>The Asteroid Impactor</h1>
+            <p class="subtitle">Real-time Near-Earth Object Tracking powered by NASA</p>
+        </header>
+
+        <div class="stats-grid">
+            <div class="stat-card blue">
+                <div class="stat-icon">🚀</div>
+                <div class="stat-value" id="total-neos">0</div>
+                <div class="stat-label">Total NEOs Today</div>
+            </div>
+            <div class="stat-card orange">
+                <div class="stat-icon">⚠️</div>
+                <div class="stat-value" id="hazardous-neos">0</div>
+                <div class="stat-label">Potentially Hazardous</div>
+            </div>
+            <div class="stat-card purple">
+                <div class="stat-icon">🌐</div>
+                <div class="stat-value">24/7</div>
+                <div class="stat-label">Live Monitoring</div>
+            </div>
+        </div>
+
+        <div class="cta-container">
+            <a href="/map" class="cta-button">
+                <span>🌍</span>
+                <span>Launch Interactive Impact Simulator</span>
+            </a>
+        </div>
+
+        <h2 class="section-title">Today's Near-Earth Asteroids</h2>
+
+        <div class="asteroid-table-container">
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>Loading asteroid data from NASA...</p>
+            </div>
+            <table id="asteroid-table" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Diameter (m)</th>
+                        <th>Mass (MT)</th>
+                        <th>Velocity (km/h)</th>
+                        <th>Miss Distance</th>
+                        <th>Date</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="asteroid-tbody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        function createStars() {
+            const starsContainer = document.getElementById('stars');
+            const numStars = 100;
+
+            for (let i = 0; i < numStars; i++) {
+                const star = document.createElement('div');
+                star.className = 'star';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.width = Math.random() * 3 + 'px';
+                star.style.height = star.style.width;
+                star.style.animationDelay = Math.random() * 3 + 's';
+                starsContainer.appendChild(star);
+            }
+        }
+
+        createStars();
+
+        function formatMassMT(mass_kg) {
+            if (mass_kg === undefined || mass_kg === null) return 'N/A';
+            return (Number(mass_kg) / 1e9).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' MT';
+        }
+
+        async function fetchNASAAsteroids() {
+            const NASA_API_KEY = '{{ nasa_api_key }}';
+            const today = new Date();
+            const endDate = new Date(today);
+            endDate.setDate(today.getDate() + 7);
+
+            const startDateStr = today.toISOString().split('T')[0];
+            const endDateStr = endDate.toISOString().split('T')[0];
+
+            const url = `https://api.nasa.gov/neo/rest/v1/feed?start_date=${startDateStr}&end_date=${endDateStr}&api_key=${NASA_API_KEY}`;
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+
+                let asteroidCount = 0;
+                let hazardousCount = 0;
+                const tbody = document.getElementById('asteroid-tbody');
+
+                for (const dateKey in data.near_earth_objects) {
+                    const asteroids = data.near_earth_objects[dateKey];
+
+                    asteroids.forEach(ast => {
+                        asteroidCount++;
+
+                        if (ast.is_potentially_hazardous_asteroid) {
+                            hazardousCount++;
+                        }
+
+                        const diameter = ast.estimated_diameter.meters.estimated_diameter_max;
+                        const radius_m = diameter / 2.0;
+                        const volume_m3 = (4 / 3) * Math.PI * Math.pow(radius_m, 3);
+                        const assumed_density = 2000.0;
+                        const mass_kg = volume_m3 * assumed_density;
+
+                        const closeApproach = ast.close_approach_data[0];
+                        const velocity = parseFloat(closeApproach.relative_velocity.kilometers_per_hour);
+                        const missDistance = parseFloat(closeApproach.miss_distance.kilometers);
+
+                        const row = tbody.insertRow();
+                        row.innerHTML = `
+                            <td><strong>${ast.name}</strong></td>
+                            <td>${diameter.toFixed(2)}</td>
+                            <td>${formatMassMT(mass_kg)}</td>
+                            <td>${velocity.toLocaleString(undefined, {maximumFractionDigits: 0})}</td>
+                            <td>${(missDistance / 1000).toFixed(0)}k km</td>
+                            <td>${dateKey}</td>
+                            <td>${ast.is_potentially_hazardous_asteroid ? '<span class="hazard-badge">HAZARDOUS</span>' : 'Safe'}</td>
+                        `;
+                    });
+                }
+
+                document.getElementById('total-neos').textContent = asteroidCount;
+                document.getElementById('hazardous-neos').textContent = hazardousCount;
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('asteroid-table').style.display = 'table';
+
+            } catch (error) {
+                console.error('Error fetching NASA data:', error);
+                document.getElementById('loading').innerHTML = '<p style="color: #e74c3c;">Error loading asteroid data from NASA: ' + error.message + '</p>';
+            }
+        }
+
+        fetchNASAAsteroids();
+    </script>
+</body>
+</html>
+    """
+    return render_template_string(landing_html, nasa_api_key=NASA_API_KEY)
+
+
+# --- Map route (interactive impact simulator) ---
+@app.route('/map')
+def map_view():
     m = folium.Map(location=[20, 0], zoom_start=2)
 
     custom_html = """
@@ -324,7 +763,6 @@ def index():
         document.getElementById('impact-btn').addEventListener('click', function() {
             if (!selectedAsteroid || !waypointLocation) return;
 
-            // Call backend for casualty calculation
             fetch('/calculate_casualties', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -340,7 +778,6 @@ def index():
             .then(casualtyData => {
                 impactLayers = {};
 
-                // Draw impact zones on map
                 var crater = L.circle(waypointLocation, {
                     radius: casualtyData.crater_diameter_m / 2,
                     color: 'black',
@@ -362,7 +799,6 @@ def index():
 
                 impactLayers.crater = {layer: crater, label: craterLabel};
 
-                // Shockwave
                 var shockwave = L.circle(waypointLocation, {
                     radius: casualtyData.shockwave_radius_km * 1000,
                     color: '#f1c40f',
@@ -384,7 +820,6 @@ def index():
 
                 impactLayers.shockwave = {layer: shockwave, label: shockwaveLabel};
 
-                // Seismic zones
                 var lightSeismic = L.circle(waypointLocation, {
                     radius: casualtyData.light_shaking_radius_km * 1000,
                     color: '#e67e22',
@@ -449,7 +884,6 @@ def index():
 
                 impactLayers.strongSeismic = {layer: strongSeismic, label: strongSeismicLabel};
 
-                // Wind zone calculation
                 var velocity_m_s = selectedAsteroid.velocity_kmh * 1000 / 3600;
                 var kineticEnergy = 0.5 * selectedAsteroid.mass_kg * velocity_m_s * velocity_m_s;
                 var RHO_AIR = 1.225;
@@ -486,7 +920,6 @@ def index():
 
                 impactLayers.wind = {layer: windZone, label: windLabel};
 
-                // Tsunami detection and visualization
                 function is_water(lat, lng) {
                     while (lng > 180) lng -= 360;
                     while (lng < -180) lng += 360;
@@ -608,7 +1041,6 @@ def index():
         html += 'Impact Energy: ' + formatEnergyTNT(data.impact_energy_joules);
         html += '</div>';
 
-        // CASUALTY ESTIMATE PANEL
         html += '<div class="death-toll">';
         html += '<h3>💀 CASUALTY ESTIMATE</h3>';
         html += '<div class="death-stat"><strong>TOTAL DEATHS: ' + data.total_deaths.toLocaleString() + '</strong></div>';
@@ -628,7 +1060,6 @@ def index():
         html += '<button class="mitigation-button" id="mitigation-btn" onclick="getMitigationTactics()">GET MITIGATION TACTICS</button>';
         html += '<div id="mitigation-content"></div>';
 
-        // Impact zones
         html += '<div class="impact-zone" data-zone="crater">';
         html += '<h3>🎯 IMPACT CRATER</h3>';
         html += '<p><strong>Crater Diameter:</strong> ' + data.crater_diameter_m.toFixed(2) + ' m</p>';
@@ -924,18 +1355,14 @@ POPULATION IN ZONES:
 - Moderate Seismic Zone: {casualty_data.get('pop_moderate_seismic', 0):,}
 - Light Seismic Zone: {casualty_data.get('pop_light_seismic', 0):,}
 
-Please provide comprehensive mitigation tactics organized into the following sections:
+Please provide tactics or things with specifics to mitigate the asteroid from hitting the select area and causing
+causalties, and ways to stop the meteor from hitting earth. Also, add if this specific meteor (by name), ever had
+or ever will have the chance to hit earth and if so, how much was the chance that it would hit, and if not, tell why.
 
-1. IMMEDIATE PRE-IMPACT ACTIONS (T-24 hours to impact)
-2. EVACUATION STRATEGIES (population movement and safe zones)
-3. EMERGENCY RESPONSE DEPLOYMENT (first responders, equipment, staging)
-4. POST-IMPACT RESCUE OPERATIONS (search and rescue priorities)
-5. INFRASTRUCTURE PROTECTION (critical systems and utilities)
-6. LONG-TERM RECOVERY PLAN (rebuilding and restoration)
+Be specific, actionable, and prioritize saving lives. Consider the actual casualty estimates and population distributions.
+Keep it short and concise. Below 12 sentences pls."""
 
-Be specific, actionable, and prioritize saving lives. Consider the actual casualty estimates and population distributions."""
-
-        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
         gemini_payload = {
             "contents": [{
@@ -945,14 +1372,14 @@ Be specific, actionable, and prioritize saving lives. Consider the actual casual
             }],
             "generationConfig": {
                 "temperature": 0.7,
-                "maxOutputTokens": 2048
+                "maxOutputTokens": 8192  # Increased from 2048
             }
         }
 
-        response = requests.post(gemini_url, json=gemini_payload, timeout=30)
+        response = requests.post(gemini_url, json=gemini_payload, timeout=60)
 
         print(f"Gemini API Response Status: {response.status_code}")
-        print(f"Gemini API Response: {response.text[:500]}")  # Print first 500 chars
+        print(f"Gemini API Response: {response.text[:500]}")
 
         if response.status_code != 200:
             error_msg = f"Gemini API error (Status {response.status_code}): {response.text}"
@@ -960,12 +1387,24 @@ Be specific, actionable, and prioritize saving lives. Consider the actual casual
             return jsonify({"error": error_msg}), 500
 
         result = response.json()
+        print(f"Full Gemini Response: {json.dumps(result, indent=2)}")
 
         if 'candidates' in result and len(result['candidates']) > 0:
-            mitigation_text = result['candidates'][0]['content']['parts'][0]['text']
-            return jsonify({"mitigation": mitigation_text})
+            candidate = result['candidates'][0]
+
+            # Check if content exists and has the expected structure
+            if 'content' in candidate and 'parts' in candidate['content'] and len(candidate['content']['parts']) > 0:
+                mitigation_text = candidate['content']['parts'][0]['text']
+                return jsonify({"mitigation": mitigation_text})
+            else:
+                # Handle case where response was blocked or has different structure
+                error_detail = candidate.get('finishReason', 'Unknown reason')
+                safety_ratings = candidate.get('safetyRatings', [])
+                error_msg = f"Response blocked or incomplete. Reason: {error_detail}. Safety ratings: {safety_ratings}"
+                print(error_msg)
+                return jsonify({"error": error_msg}), 500
         else:
-            return jsonify({"error": "No response from Gemini API"}), 500
+            return jsonify({"error": f"No valid response from Gemini API. Response: {result}"}), 500
 
     except Exception as e:
         error_msg = f"Exception in get_mitigation: {str(e)}"
