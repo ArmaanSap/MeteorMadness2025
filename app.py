@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from flask import Flask, jsonify, Response
+from flask import Flask, jsonify, Response, request
 import folium
 import requests
 from dotenv import load_dotenv
@@ -9,6 +9,11 @@ import datetime
 import json
 import time
 import math
+import rasterio
+from rasterio.transform import rowcol
+import numpy as np
+
+dataset = rasterio.open("data/gpw_v4_population_count_rev11_2020_30_sec.tif")
 
 load_dotenv()
 
@@ -25,61 +30,179 @@ def after_request(response):
     return response
 
 
+def get_population_in_radius(lat, lon, radius_km):
+    """
+    Query GPW v4 raster to get population count within a circular radius.
+
+    Args:
+        lat: Latitude of center point
+        lon: Longitude of center point
+        radius_km: Radius in kilometers
+
+    Returns:
+        Total population count in the circular area
+    """
+    try:
+        # Convert radius to degrees (approximate)
+        # 1 degree latitude ≈ 111 km
+        # 1 degree longitude varies by latitude
+        lat_degrees = radius_km / 111.0
+        lon_degrees = radius_km / (111.0 * math.cos(math.radians(lat)))
+
+        # Define bounding box
+        min_lon = lon - lon_degrees
+        max_lon = lon + lon_degrees
+        min_lat = lat - lat_degrees
+        max_lat = lat + lat_degrees
+
+        # Convert geographic coordinates to pixel coordinates
+        window = rasterio.windows.from_bounds(
+            min_lon, min_lat, max_lon, max_lat,
+            dataset.transform
+        )
+
+        # Read the data window
+        data = dataset.read(1, window=window, masked=True)
+
+        if data.size == 0:
+            return 0
+
+        # Get the affine transform for this window
+        window_transform = dataset.window_transform(window)
+
+        # Create coordinate arrays for each pixel
+        rows, cols = np.meshgrid(
+            np.arange(data.shape[0]),
+            np.arange(data.shape[1]),
+            indexing='ij'
+        )
+
+        # Convert pixel coordinates to geographic coordinates
+        xs, ys = rasterio.transform.xy(window_transform, rows.flatten(), cols.flatten())
+        xs = np.array(xs).reshape(data.shape)
+        ys = np.array(ys).reshape(data.shape)
+
+        # Calculate distance from center point for each pixel
+        distances = np.sqrt(
+            ((xs - lon) * 111.0 * math.cos(math.radians(lat))) ** 2 +
+            ((ys - lat) * 111.0) ** 2
+        )
+
+        # Create circular mask
+        mask = distances <= radius_km
+
+        # Sum population within the circle
+        if isinstance(data, np.ma.MaskedArray):
+            masked_data = np.ma.array(data, mask=~mask | data.mask)
+        else:
+            masked_data = np.ma.array(data, mask=~mask)
+
+        population = float(np.ma.sum(masked_data))
+        return max(0, population)
+
+    except Exception as e:
+        print(f"Error reading population data: {e}")
+        return 0
+
+
+def calculate_impact_casualties(lat, lon, diameter_m, mass_kg, velocity_kmh):
+    """
+    Calculate casualties from meteor impact using GPW v4 population data.
+    Uses the original seismic and impact zone calculations.
+    """
+
+    # Calculate impact energy
+    velocity_m_s = velocity_kmh * 1000 / 3600
+    kinetic_energy = 0.5 * mass_kg * velocity_m_s ** 2  # Joules
+
+    # --- IMPACT ZONES (using original calculations) ---
+    # Crater: Complete vaporization
+    crater_diameter_m = diameter_m * 15
+    crater_radius_km = crater_diameter_m / 2000
+
+    # Shockwave (original calculation)
+    shockwave_radius_km = math.pow(kinetic_energy, 1 / 3) * 0.05 / 1000
+
+    # Seismic zones (original calculations)
+    magnitude = (2 / 3) * math.log10(kinetic_energy / 1000) - 3.2
+    strong_shaking_radius_km = math.pow(10, 0.5 * magnitude - 2.0)
+    moderate_shaking_radius_km = math.pow(10, 0.5 * magnitude - 1.3)
+    light_shaking_radius_km = math.pow(10, 0.5 * magnitude - 0.8)
+
+    # Tsunami (if water impact)
+    rho = 1000  # water density kg/m^3
+    g = 9.81
+    k = 0.18  # scaling factor
+    initial_wave_height = k * math.pow(kinetic_energy / (rho * g), 0.25)
+    tsunami_radius_km = 500 * (diameter_m / 1000)
+
+    # --- GET POPULATION IN EACH ZONE ---
+    print(f"Calculating casualties for impact at ({lat}, {lon})")
+    print(f"Energy: {kinetic_energy:.2e} J, Magnitude: {magnitude:.2f}")
+
+    # Get cumulative populations
+    pop_crater = get_population_in_radius(lat, lon, crater_radius_km)
+    pop_shockwave = get_population_in_radius(lat, lon, shockwave_radius_km)
+    pop_strong_seismic = get_population_in_radius(lat, lon, strong_shaking_radius_km)
+    pop_moderate_seismic = get_population_in_radius(lat, lon, moderate_shaking_radius_km)
+    pop_light_seismic = get_population_in_radius(lat, lon, light_shaking_radius_km)
+    pop_tsunami = get_population_in_radius(lat, lon, tsunami_radius_km)
+
+    # Calculate deaths in each zone (using incremental populations)
+    # Crater: 100% fatality
+    crater_deaths = int(pop_crater)
+
+    # Shockwave (excluding crater): 30% fatality
+    shockwave_deaths = int(max(0, (pop_shockwave - pop_strong_seismic) * 0.3))
+
+    # Strong seismic (excluding shockwave): 60% fatality (MMI VII+)
+    strong_seismic_deaths = int(max(0, (pop_strong_seismic - pop_crater) * 0.8))
+
+    # Moderate and light seismic: no deaths calculated (injuries only)
+    moderate_seismic_deaths = 0
+    light_seismic_deaths = 0
+
+    # Tsunami deaths: not calculated (water detection needs improvement)
+    tsunami_deaths = 0
+
+    total_deaths = (crater_deaths + shockwave_deaths + strong_seismic_deaths +
+                    moderate_seismic_deaths + light_seismic_deaths)
+
+    print(f"Total deaths: {total_deaths:,}")
+
+    return {
+        "total_deaths": total_deaths,
+        "crater_deaths": crater_deaths,
+        "shockwave_deaths": shockwave_deaths,
+        "strong_seismic_deaths": strong_seismic_deaths,
+        "moderate_seismic_deaths": moderate_seismic_deaths,
+        "light_seismic_deaths": light_seismic_deaths,
+        "tsunami_deaths": tsunami_deaths,
+        "crater_radius_km": round(crater_radius_km, 3),
+        "crater_diameter_m": round(crater_diameter_m, 2),
+        "shockwave_radius_km": round(shockwave_radius_km, 2),
+        "strong_shaking_radius_km": round(strong_shaking_radius_km, 2),
+        "moderate_shaking_radius_km": round(moderate_shaking_radius_km, 2),
+        "light_shaking_radius_km": round(light_shaking_radius_km, 2),
+        "tsunami_wave_height_m": round(initial_wave_height, 2),
+        "tsunami_radius_km": round(tsunami_radius_km, 2),
+        "impact_energy_joules": kinetic_energy,
+        "earthquake_magnitude": round(magnitude, 2)
+    }
+
+
 def asteroid_energy(mass_kg, velocity_kmh):
-    """
-    Calculate kinetic energy of an asteroid in Joules.
-    """
-    velocity_m_s = velocity_kmh / 3.6  # convert km/h to m/s
+    """Calculate kinetic energy of an asteroid in Joules."""
+    velocity_m_s = velocity_kmh / 3.6
     energy_joules = 0.5 * mass_kg * velocity_m_s ** 2
     return energy_joules
 
 
-def impact_wind_speed(energy_joules, distance_m=1000):
-    """
-    Estimate wind speed (m/s) from asteroid impact blast using simplified physics.
-    - energy_joules: impact kinetic energy (J)
-    - distance_m: distance from impact center (m)
-    """
-    RHO_AIR = 1.225  # kg/m^3
-    C_SOUND = 343.0  # m/s
-    # TNT equivalent (1 ton TNT = 4.184e9 J)
-    W_tnt_kg = energy_joules / 4.184e6
-    # Scaled distance Z = R / W^(1/3)
-    Z = distance_m / (W_tnt_kg ** (1 / 3))
-    # Approximate overpressure (Pa) based on empirical fit to Kingery–Bulmash curve
-    # Only a rough fit for demonstration purposes
-    if Z <= 0:
-        Z = 0.1
-    delta_p = 1e5 * (1 / (Z ** 1.8))  # Pa, approximate scaling
-    # Particle velocity (air movement speed)
-    u = delta_p / (RHO_AIR * C_SOUND)
-    return max(u, 0)
-
-
-def tsunami_size(mass_kg, velocity_kmh, diameter_m):
-    """Calculate wave height and tsunami radius"""
-    energy_joules = asteroid_energy(mass_kg, velocity_kmh)
-    initial_wave_height = 0.2 * (energy_joules / 9810) ** 0.25
-    diameter_km = diameter_m / 1000
-    tsunami_radius = 500 * diameter_km
-    return initial_wave_height, tsunami_radius
-
-
-def earthquake_size(mass_kg, velocity_kmh):
-    """Calculate earthquake magnitude and radius with corrected energy scaling"""
-    energy_joules = asteroid_energy(mass_kg, velocity_kmh)
-    seismic_energy = energy_joules / 1000  # More accurate seismic energy conversion
-    magnitude = (2 / 3) * math.log10(seismic_energy) - 3.2
-    radius_km = 10 ** (magnitude - 3) / 1.5
-    return radius_km, magnitude
-
-
 # --- Asteroid generator ---
 def generate_asteroids():
-    """Generator yielding hazardous asteroids with mass."""
     count = 0
     start_time = time.time()
-    timeout = 60  # seconds
+    timeout = 60
 
     end_date = datetime.date.today() - datetime.timedelta(days=7)
     start_date = datetime.date(2015, 1, 1)
@@ -143,340 +266,70 @@ def generate_asteroids():
 def index():
     m = folium.Map(location=[20, 0], zoom_start=2)
 
-    # Inline HTML + JS for sidebar, asteroid list, and impact simulation
     custom_html = """
     <style>
-    .sidebar {position: fixed; left: 0; top: 0; width: 350px; height: 100%; background-color: #2c3e50; color: white; padding: 20px; padding-bottom: 300px; overflow-y: auto; z-index:1000;}
+    .sidebar {position: fixed; left: 0; top: 0; width: 350px; height: 100%; background-color: #2c3e50; color: white; padding: 20px; overflow-y: auto; z-index:1000;}
     .asteroid-item {background-color:#34495e; margin:10px 0; padding:15px; border-radius:5px; cursor:pointer; transition:0.3s;}
     .asteroid-item:hover {background-color:#e74c3c; transform: translateX(5px);}
     .asteroid-item.selected {background-color:#e74c3c; border:2px solid white;}
     .hazard-badge {display:inline-block;background-color:#e74c3c;color:white;padding:2px 6px;border-radius:3px;font-size:10px;margin-top:5px;}
     .impact-button {width:100%; padding:15px; background-color:#27ae60; color:white; border:none; border-radius:5px; font-weight:bold; cursor:pointer; margin-top:20px;}
     .impact-button:disabled {background-color:#95a5a6; cursor:not-allowed;}
-    .impact-zone {background-color:#34495e; margin:20px 0; padding:20px; border-radius:8px; border-left:4px solid #e74c3c; cursor:pointer; transition:0.3s;}
-    .impact-zone:hover {background-color:#415b76; transform: translateX(3px);}
-    .impact-zone.active {background-color:#e74c3c; border-left-color:#fff;}
-    .impact-zone h3 {margin-top:0; font-size:18px; color:#ecf0f1;}
-    .impact-zone p {margin:8px 0; font-size:14px; line-height:1.6;}
-    .back-button {width:100%; padding:12px; background-color:#7f8c8d; color:white; border:none; border-radius:5px; font-weight:bold; cursor:pointer; margin-bottom:20px;}
-    .back-button:hover {background-color:#95a5a6;}
+    .death-toll {background-color:#c0392b; padding:15px; border-radius:5px; margin-top:15px; display:none;}
+    .death-toll h3 {margin:0 0 10px 0; font-size:16px;}
+    .death-stat {font-size:11px; margin:5px 0; padding:5px; background-color:#922b21; border-radius:3px;}
     #map {margin-left:350px;}
     </style>
 
-    <div class="sidebar" id="sidebar-content">
-        <h2>Hazardous Meteor Impacts</h2>
+    <div class="sidebar">
+        <h2>☄️ Meteor Impact Simulator</h2>
         <div class="status-text" id="status-text">Searching for asteroids...</div>
         <div id="asteroid-list"></div>
         <button class="impact-button" id="impact-btn" disabled>SIMULATE IMPACT</button>
-        <div class="info-text">1. Select asteroid<br>2. Click map to place target<br>3. SIMULATE IMPACT</div>
+        <div class="info-text" style="font-size:11px; color:#bdc3c7; margin-top:10px;">1. Select asteroid<br>2. Click map to place target<br>3. SIMULATE IMPACT</div>
+        <div class="death-toll" id="death-toll">
+            <h3>💀 CASUALTY ESTIMATE</h3>
+            <div id="death-stats">Calculating...</div>
+        </div>
     </div>
 
     <script>
     var selectedAsteroid=null, waypointMarker=null, waypointLocation=null, map=null, allAsteroids=[];
-    var impactLayers = {}; // Store all impact layers
-    var currentActiveZone = null;
 
-    function formatMassMT(mass_kg) {
-        if (mass_kg === undefined || mass_kg === null) return 'N/A';
-        // Correctly convert kg to Megatons (1 billion kg)
-        return (Number(mass_kg) / 1e9).toLocaleString(undefined, {maximumFractionDigits: 2}) + ' MT';
-    }
-
-    function formatEnergyTNT(energy_joules) {
-        if (energy_joules === undefined || energy_joules === null) return 'N/A';
-        // 1 kiloton of TNT = 4.184e12 Joules
-        var kilotons = energy_joules / 4.184e12;
-        if (kilotons < 1000) {
-            return kilotons.toLocaleString(undefined, {maximumFractionDigits: 2}) + ' Kilotons of TNT';
-        } else {
-            var megatons = kilotons / 1000;
-            return megatons.toLocaleString(undefined, {maximumFractionDigits: 2}) + ' Megatons of TNT';
-        }
-    }
+    document.getElementById('asteroid-list').addEventListener('click', function(e){
+        var item=e.target.closest('.asteroid-item'); if(!item) return;
+        document.querySelectorAll('.asteroid-item').forEach(i=>i.classList.remove('selected'));
+        item.classList.add('selected');
+        selectedAsteroid={
+            name:item.getAttribute('data-name'),
+            diameter:parseFloat(item.getAttribute('data-diameter')),
+            mass_kg:parseFloat(item.getAttribute('data-mass')),
+            velocity_kmh:parseFloat(item.getAttribute('data-velocity'))
+        };
+        updateImpactButton();
+    });
 
     function addAsteroid(ast){
         allAsteroids.push(ast);
-
-        var massText = formatMassMT(ast.mass_kg);
-        var velocityText = (ast.velocity_kmh !== undefined && ast.velocity_kmh !== null)
-            ? Number(ast.velocity_kmh).toLocaleString(undefined, {maximumFractionDigits: 0}) + ' km/h'
-            : 'N/A';
-
-        var html = '<div class="asteroid-item" data-name="'+ast.name+'" data-diameter="'+ast.diameter+'" data-mass="'+ast.mass_kg+'" data-velocity="'+ast.velocity_kmh+'">'+
-               '<div><strong>'+ast.name+'</strong></div>'+
-               '<div>Diameter: '+ast.diameter.toFixed(2)+' m</div>'+
-               '<div>Mass: '+massText+'</div>'+
-               '<div>Velocity: '+velocityText+'</div>'+
-               '<div>Miss Dist: '+(ast.miss_distance_km/1000).toFixed(0)+'k km</div>'+
-               '<div>Date: '+ast.date+'</div>'+
-               '<span class="hazard-badge">HAZARDOUS</span></div>';
-
-        document.getElementById('asteroid-list').innerHTML += html;
-        document.getElementById('status-text').innerHTML = 'Found '+allAsteroids.length+' asteroid(s)... searching...';
+        var massText=(ast.mass_kg!==undefined)?Number(ast.mass_kg).toExponential(2)+' kg':'N/A';
+        var velocityText=(ast.velocity_kmh!==undefined)?Number(ast.velocity_kmh).toFixed(0)+' km/h':'N/A';
+        var html='<div class="asteroid-item" data-name="'+ast.name+'" data-diameter="'+ast.diameter+'" data-mass="'+ast.mass_kg+'" data-velocity="'+ast.velocity_kmh+'">'+
+                 '<div><strong>'+ast.name+'</strong></div>'+
+                 '<div style="font-size:11px;">Ø: '+ast.diameter.toFixed(1)+' m | Mass: '+massText+'</div>'+
+                 '<div style="font-size:11px;">Velocity: '+velocityText+'</div>'+
+                 '<span class="hazard-badge">HAZARDOUS</span></div>';
+        document.getElementById('asteroid-list').innerHTML+=html;
+        document.getElementById('status-text').innerHTML='Found '+allAsteroids.length+' asteroid(s)...';
     }
 
-    function updateImpactButton(){document.getElementById('impact-btn').disabled=!(selectedAsteroid && waypointLocation);}
+    function updateImpactButton(){
+        document.getElementById('impact-btn').disabled=!(selectedAsteroid && waypointLocation);
+    }
 
-    function reattachAsteroidListEvents() {
-        document.getElementById('asteroid-list').addEventListener('click', function(e){
-            var item = e.target.closest('.asteroid-item'); 
-            if(!item) return;
-            document.querySelectorAll('.asteroid-item').forEach(i=>i.classList.remove('selected'));
-            item.classList.add('selected');
-            var name=item.getAttribute('data-name');
-            var diameter=parseFloat(item.getAttribute('data-diameter'));
-            var mass=parseFloat(item.getAttribute('data-mass'));
-            var velocity=parseFloat(item.getAttribute('data-velocity'));
-            selectedAsteroid={name:name, diameter:diameter, mass_kg:mass, velocity_kmh:velocity};
-            updateImpactButton();
-        });
-
-        document.getElementById('impact-btn').addEventListener('click', function() {
-            if (!selectedAsteroid || !waypointLocation) return;
-
-            var velocity_kmh = selectedAsteroid.velocity_kmh;
-            var mass_kg = selectedAsteroid.mass_kg;
-            var diameter_m = selectedAsteroid.diameter;
-            var velocity_m_s = velocity_kmh * 1000 / 3600;
-            var kineticEnergy = 0.5 * mass_kg * velocity_m_s * velocity_m_s; // Energy in Joules
-
-            impactLayers = {};
-
-            var craterDiameter = diameter_m * 20;
-            var crater = L.circle(waypointLocation, {
-                radius: craterDiameter,
-                color: 'black',
-                fillColor: '#000000',
-                fillOpacity: 1,
-                weight: 3,
-                interactive: false
-            }).addTo(map);
-
-            var craterLabel = L.marker(waypointLocation, {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(0,0,0,0.8);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Crater: ' + (craterDiameter).toFixed(0) + ' m</div>',
-                    iconSize: [100, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.crater = {layer: crater, center: waypointLocation, radius: craterDiameter, label: craterLabel};
-
-            var shockwaveRadius = Math.pow(kineticEnergy, 1/3) * 0.05;
-            var shockwave = L.circle(waypointLocation, {
-                radius: shockwaveRadius,
-                color: '#f1c40f',
-                fillColor: '#f1c40f',
-                fillOpacity: 0.2,
-                weight: 2,
-                interactive: false
-            }).addTo(map);
-
-            var shockwaveLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(241,196,15,0.9);color:black;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Shockwave: ' + (shockwaveRadius/1000).toFixed(1) + ' km</div>',
-                    iconSize: [120, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.shockwave = {layer: shockwave, center: waypointLocation, radius: shockwaveRadius, label: shockwaveLabel};
-
-            var RHO_AIR = 1.225;
-            var C_SOUND = 343.0;
-            var W_tnt_kg = kineticEnergy / 4.184e6;
-            var distance_ref_m = 1000;
-            var Z = distance_ref_m / Math.pow(W_tnt_kg, 1/3);
-            if (Z <= 0) Z = 0.1;
-            var delta_p = 1e5 * (1 / Math.pow(Z, 1.8));
-            var wind_speed_ms = delta_p / (RHO_AIR * C_SOUND);
-            var wind_speed_kmh = wind_speed_ms * 3.6;
-
-            var target_wind_kmh = 60;
-            var target_wind_ms = target_wind_kmh / 3.6;
-            var u_ref_ms = wind_speed_ms;
-            var Z_ref = Z;
-            var Z_target = Math.pow(u_ref_ms / target_wind_ms, 1 / 1.8) * Z_ref;
-            var R_target = Z_target * Math.pow(W_tnt_kg, 1/3);
-
-            var windZone = L.circle(waypointLocation, {
-                radius: R_target,
-                color: '#5dade2',
-                fillColor: '#5dade2',
-                fillOpacity: 0.15,
-                weight: 2,
-                interactive: false
-            }).addTo(map);
-
-            var windLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(93,173,226,0.9);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Wind Zone: ' + (R_target/1000).toFixed(1) + ' km</div>',
-                    iconSize: [120, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.wind = {layer: windZone, center: waypointLocation, radius: R_target, label: windLabel};
-
-            var seismic_energy = kineticEnergy / 1000;
-            var magnitude = (2/3) * Math.log10(seismic_energy) - 3.2;
-            var strongShakingRadius = Math.pow(10, 0.5 * magnitude - 2.0);
-            var lightShakingRadius = Math.pow(10, 0.5 * magnitude - 0.8);
-            var moderateShakingRadius = Math.pow(10, 0.5 * magnitude - 1.3);
-
-            var lightSeismic = L.circle(waypointLocation, {
-                radius: lightShakingRadius * 1000,
-                color: '#e67e22',
-                fillColor: '#e67e22',
-                fillOpacity: 0.12,
-                weight: 1,
-                dashArray: '5, 5',
-                interactive: false
-            }).addTo(map);
-
-            var lightSeismicLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(230,126,34,0.9);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Light Seismic: ' + lightShakingRadius.toFixed(1) + ' km</div>',
-                    iconSize: [140, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.lightSeismic = {layer: lightSeismic, center: waypointLocation, radius: lightShakingRadius * 1000, label: lightSeismicLabel};
-
-            var moderateSeismic = L.circle(waypointLocation, {
-                radius: moderateShakingRadius * 1000,
-                color: '#d35400',
-                fillColor: '#d35400',
-                fillOpacity: 0.18,
-                weight: 2,
-                interactive: false
-            }).addTo(map);
-
-            var moderateSeismicLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(211,84,0,0.9);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Moderate Seismic: ' + moderateShakingRadius.toFixed(1) + ' km</div>',
-                    iconSize: [160, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.moderateSeismic = {layer: moderateSeismic, center: waypointLocation, radius: moderateShakingRadius * 1000, label: moderateSeismicLabel};
-
-            var strongSeismic = L.circle(waypointLocation, {
-                radius: strongShakingRadius * 1000,
-                color: '#c0392b',
-                fillColor: '#c0392b',
-                fillOpacity: 0.25,
-                weight: 2,
-                interactive: false
-            }).addTo(map);
-
-            var strongSeismicLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                icon: L.divIcon({
-                    className: 'impact-label',
-                    html: '<div style="background:rgba(192,57,43,0.9);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Strong Seismic: ' + strongShakingRadius.toFixed(1) + ' km</div>',
-                    iconSize: [150, 20]
-                }),
-                interactive: false
-            }).addTo(map);
-
-            impactLayers.strongSeismic = {layer: strongSeismic, center: waypointLocation, radius: strongShakingRadius * 1000, label: strongSeismicLabel};
-
-            // Water detection - returns true for major water bodies
-            function is_water(lat, lng) {
-                // Normalize longitude to -180 to 180
-                while (lng > 180) lng -= 360;
-                while (lng < -180) lng += 360;
-
-                // Arctic and Antarctic Oceans
-                if (lat > 70 || lat < -60) return true;
-
-                // Major land masses to EXCLUDE (continents)
-                var landMasses = [
-                    // North America
-                    {latMin: 15, latMax: 72, lngMin: -170, lngMax: -52},
-                    // South America
-                    {latMin: -56, latMax: 13, lngMin: -82, lngMax: -34},
-                    // Europe
-                    {latMin: 36, latMax: 71, lngMin: -10, lngMax: 40},
-                    // Africa
-                    {latMin: -35, latMax: 37, lngMin: -18, lngMax: 52},
-                    // Asia
-                    {latMin: 0, latMax: 55, lngMin: 60, lngMax: 150},
-                    // Australia
-                    {latMin: -44, latMax: -10, lngMin: 113, lngMax: 154},
-                    // Greenland
-                    {latMin: 60, latMax: 83, lngMin: -73, lngMax: -12}
-                ];
-
-                // Check if point is in any land mass
-                for (var i = 0; i < landMasses.length; i++) {
-                    var land = landMasses[i];
-                    if (lat >= land.latMin && lat <= land.latMax && 
-                        lng >= land.lngMin && lng <= land.lngMax) {
-                        return false; // It's on land
-                    }
-                }
-
-                // If not on land, assume it's water
-                return true;
-            }
-
-            var tsunamiData = null;
-            if (is_water(waypointLocation.lat, waypointLocation.lng)) {
-                var rho = 1000;
-                var g = 9.81;
-                var k = 0.18;
-                var initial_wave_height = k * Math.pow(kineticEnergy / (rho * g), 0.25);
-                var tsunami_radius_km = 500 * (diameter_m / 1000);
-
-                var tsunamiCircle = L.circle(waypointLocation, {
-                    radius: tsunami_radius_km * 1000,
-                    color: '#3498db',
-                    fillColor: '#3498db',
-                    fillOpacity: 0.15,
-                    weight: 2,
-                    dashArray: '10, 10',
-                    interactive: false
-                }).addTo(map);
-
-                var tsunamiLabel = L.marker([waypointLocation.lat, waypointLocation.lng], {
-                    icon: L.divIcon({
-                        className: 'impact-label',
-                        html: '<div style="background:rgba(52,152,219,0.9);color:white;padding:5px;border-radius:3px;font-size:11px;font-weight:bold;white-space:nowrap;">Tsunami: ' + tsunami_radius_km.toFixed(1) + ' km</div>',
-                        iconSize: [120, 20]
-                    }),
-                    interactive: false
-                }).addTo(map);
-
-                impactLayers.tsunami = {layer: tsunamiCircle, center: waypointLocation, radius: tsunami_radius_km * 1000, label: tsunamiLabel};
-                tsunamiData = {waveHeight: initial_wave_height, radius: tsunami_radius_km};
-            }
-
-            if (waypointMarker) {
-                map.removeLayer(waypointMarker);
-                waypointMarker = null;
-            }
-
-            showImpactResults(selectedAsteroid, waypointLocation, {
-                crater: {diameter: craterDiameter, energy: kineticEnergy},
-                shockwave: {radius: shockwaveRadius / 1000},
-                wind: {radius: R_target / 1000, speed: target_wind_kmh},
-                seismic: {
-                    magnitude: magnitude,
-                    strong: strongShakingRadius,
-                    moderate: moderateShakingRadius,
-                    light: lightShakingRadius
-                },
-                tsunami: tsunamiData
-            });
-        });
+    function is_water(lat, lng) {
+        // Simplified water detection - checks if likely ocean
+        // More accurate would use a water mask dataset
+        return (Math.abs(lat) < 60); // rough ocean probability
     }
 
     setTimeout(function(){
@@ -485,220 +338,186 @@ def index():
                 if(waypointMarker){map.removeLayer(waypointMarker);}
                 waypointLocation=e.latlng;
                 waypointMarker=L.marker(e.latlng).addTo(map);
-                waypointMarker.bindPopup('Impact Target<br>Lat:'+e.latlng.lat.toFixed(4)+'<br>Lng:'+e.latlng.lng.toFixed(4)).openPopup();
+                waypointMarker.bindPopup('🎯 Impact Target<br>Lat:'+e.latlng.lat.toFixed(4)+'<br>Lng:'+e.latlng.lng.toFixed(4)).openPopup();
                 updateImpactButton();
             }); break;}
         }
     }, 1000);
 
-    // Initial event listener setup
-    reattachAsteroidListEvents();
+    document.getElementById('impact-btn').addEventListener('click', function() {
+        if (!selectedAsteroid || !waypointLocation) return;
+
+        // Show death toll panel
+        document.getElementById('death-toll').style.display = 'block';
+        document.getElementById('death-stats').innerHTML = 'Calculating casualties from GPW v4 data...';
+
+        // Call backend to calculate casualties
+        fetch('/calculate_casualties', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                lat: waypointLocation.lat,
+                lon: waypointLocation.lng,
+                diameter: selectedAsteroid.diameter,
+                mass_kg: selectedAsteroid.mass_kg,
+                velocity_kmh: selectedAsteroid.velocity_kmh
+            })
+        })
+        .then(r => r.json())
+        .then(data => {
+            // Display casualties
+            var statsHtml = 
+                '<div class="death-stat"><strong>TOTAL DEATHS: ' + data.total_deaths.toLocaleString() + '</strong></div>' +
+                '<div class="death-stat">☠️ Crater: ' + data.crater_deaths.toLocaleString() + ' (100%)</div>' +
+                '<div class="death-stat">💨 Shockwave: ' + data.shockwave_deaths.toLocaleString() + ' (30%)</div>' +
+                '<div class="death-stat">🔴 Strong Seismic: ' + data.strong_seismic_deaths.toLocaleString() + ' (60%)</div>' +
+                '<div class="death-stat">🟠 Moderate Seismic: Injuries only</div>' +
+                '<div class="death-stat">🟡 Light Seismic: Minor damage</div>';
+
+            if (data.tsunami_deaths > 0) {
+                statsHtml += '<div class="death-stat">🌊 Tsunami: Data unavailable</div>';
+            }
+
+            statsHtml += '<div class="death-stat" style="margin-top:8px;">⚡ Energy: ' + data.impact_energy_joules.toExponential(2) + ' J</div>' +
+                '<div class="death-stat">🌍 Earthquake: M' + data.earthquake_magnitude + '</div>';
+
+            document.getElementById('death-stats').innerHTML = statsHtml;
+
+            // LAYER ORDER: Light Seismic -> Tsunami -> Moderate -> Shockwave -> Strong -> Crater
+
+            // 1. LIGHT SEISMIC (bottom layer)
+            var lightSeismic = L.circle(waypointLocation, {
+                radius: data.light_shaking_radius_km * 1000,
+                color: '#e67e22', fillColor: '#e67e22', fillOpacity: 0.12, weight: 1, dashArray: '5, 5', interactive: true
+            }).addTo(map);
+            lightSeismic.bindPopup(
+                '<strong>🟡 LIGHT SEISMIC ACTIVITY</strong><br>' +
+                'Magnitude: M' + data.earthquake_magnitude.toFixed(2) + '<br>' +
+                'Radius: ' + data.light_shaking_radius_km.toFixed(2) + ' km<br>' +
+                'Deaths: Minor damage only<br>' +
+                'Intensity: MMI III-IV<br>' +
+                'Felt indoors, hanging objects swing, slight vibration'
+            );
+
+            // 2. TSUNAMI (if applicable)
+            if (is_water(waypointLocation.lat, waypointLocation.lng)) {
+                var tsunamiCircle = L.circle(waypointLocation, {
+                    radius: data.tsunami_radius_km * 1000,
+                    color: '#3498db', fillColor: '#3498db', fillOpacity: 0.15, weight: 2, dashArray: '10, 10', interactive: true
+                }).addTo(map);
+                tsunamiCircle.bindPopup(
+                    '<strong>🌊 TSUNAMI ZONE</strong><br>' +
+                    'Initial Wave Height: ' + data.tsunami_wave_height_m.toFixed(2) + ' m<br>' +
+                    'Affected Radius: ' + data.tsunami_radius_km.toFixed(2) + ' km<br>' +
+                    'Deaths: Calculation unavailable<br>' +
+                    '(Impact in ocean)'
+                );
+            }
+
+            // 3. MODERATE SEISMIC
+            var moderateSeismic = L.circle(waypointLocation, {
+                radius: data.moderate_shaking_radius_km * 1000,
+                color: '#d35400', fillColor: '#d35400', fillOpacity: 0.18, weight: 2, interactive: true
+            }).addTo(map);
+            moderateSeismic.bindPopup(
+                '<strong>🟠 MODERATE SEISMIC ACTIVITY</strong><br>' +
+                'Magnitude: M' + data.earthquake_magnitude.toFixed(2) + '<br>' +
+                'Radius: ' + data.moderate_shaking_radius_km.toFixed(2) + ' km<br>' +
+                'Deaths: Injuries, not fatal<br>' +
+                'Intensity: MMI V-VI<br>' +
+                'Felt by all, furniture moves, weak structures damaged'
+            );
+
+            // 4. SHOCKWAVE
+            var shockwave = L.circle(waypointLocation, {
+                radius: data.shockwave_radius_km * 1000,
+                color: '#f1c40f', fillColor: '#f1c40f', fillOpacity: 0.2, weight: 2, interactive: true
+            }).addTo(map);
+            shockwave.bindPopup(
+                '<strong>💨 SHOCKWAVE ZONE</strong><br>' + 
+                'Radius: ' + data.shockwave_radius_km.toFixed(2) + ' km<br>' +
+                'Deaths: ' + data.shockwave_deaths.toLocaleString() + '<br>' +
+                'Extreme destruction and fires<br>' +
+                'Asteroid Mass: ' + selectedAsteroid.mass_kg.toExponential(2) + ' kg<br>' +
+                'Velocity: ' + selectedAsteroid.velocity_kmh.toFixed(0) + ' km/h'
+            );
+
+            // 5. STRONG SEISMIC
+            var strongSeismic = L.circle(waypointLocation, {
+                radius: data.strong_shaking_radius_km * 1000,
+                color: '#c0392b', fillColor: '#c0392b', fillOpacity: 0.25, weight: 2, interactive: true
+            }).addTo(map);
+            strongSeismic.bindPopup(
+                '<strong>🔴 STRONG SEISMIC ACTIVITY</strong><br>' +
+                'Magnitude: M' + data.earthquake_magnitude.toFixed(2) + '<br>' +
+                'Radius: ' + data.strong_shaking_radius_km.toFixed(2) + ' km<br>' +
+                'Deaths: ' + data.strong_seismic_deaths.toLocaleString() + '<br>' +
+                'Intensity: MMI VII+<br>' +
+                'Significant damage, buildings collapse, ground cracks'
+            );
+
+            // 6. CRATER (top layer)
+            var crater = L.circle(waypointLocation, {
+                radius: data.crater_diameter_m / 2,
+                color: 'black', fillColor: '#000000', fillOpacity: 1, weight: 3, interactive: true
+            }).addTo(map);
+            crater.bindPopup(
+                '<strong>💥 IMPACT CRATER</strong><br>' +
+                'Asteroid: ' + selectedAsteroid.name + '<br>' +
+                'Asteroid Diameter: ' + selectedAsteroid.diameter.toFixed(2) + ' m<br>' +
+                'Crater Diameter: ' + data.crater_diameter_m.toFixed(2) + ' m<br>' +
+                'Deaths: ' + data.crater_deaths.toLocaleString() + '<br>' +
+                'Impact Energy: ' + data.impact_energy_joules.toExponential(2) + ' J<br>' +
+                'Lat: ' + waypointLocation.lat.toFixed(4) + '<br>' +
+                'Lng: ' + waypointLocation.lng.toFixed(4)
+            ).openPopup();
+
+            if (waypointMarker) {
+                map.removeLayer(waypointMarker);
+                waypointMarker = null;
+                waypointLocation = null;
+            }
+            document.getElementById('impact-btn').disabled = true;
+        })
+        .catch(err => {
+            document.getElementById('death-stats').innerHTML = 'Error calculating casualties: ' + err;
+        });
+    });
 
     fetch('/stream_asteroids').then(r=>{
         const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer='';
         function processText(result){
-            if(result.done){document.getElementById('status-text').innerHTML='Stream complete. Found '+allAsteroids.length+' hazardous asteroids.'; return;}
+            if(result.done){document.getElementById('status-text').innerHTML='Found '+allAsteroids.length+' hazardous asteroids'; return;}
             buffer+=decoder.decode(result.value,{stream:true});
             const lines=buffer.split('\\n'); buffer=lines.pop();
             lines.forEach(line=>{
                 if(line.startsWith('data: ')){try{const data=JSON.parse(line.substring(6));
                     if(data.asteroid){addAsteroid(data.asteroid);}
-                    else if(data.status){document.getElementById('status-text').innerHTML=data.status;}
-                }catch(e){console.error(e);}}});
+                }catch(e){}}});
             return reader.read().then(processText);
         }
         reader.read().then(processText);
     });
-
-    function showImpactResults(asteroid, location, data) {
-        var sidebar = document.getElementById('sidebar-content');
-        var html = '<button class="back-button" onclick="resetToAsteroidList()">← Back to Asteroid List</button>';
-        html += '<h2>Impact Analysis</h2>';
-        html += '<div style="background-color:#34495e; padding:15px; border-radius:5px; margin-bottom:20px;">';
-        html += '<strong>' + asteroid.name + '</strong><br>';
-        html += 'Diameter: ' + asteroid.diameter.toFixed(2) + ' m<br>';
-        html += 'Mass: ' + formatMassMT(asteroid.mass_kg) + '<br>';
-        html += 'Velocity: ' + asteroid.velocity_kmh.toLocaleString(undefined, {maximumFractionDigits: 0}) + ' km/h<br>';
-        html += 'Impact Energy: ' + formatEnergyTNT(data.crater.energy);
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="crater">';
-        html += '<h3>🎯 IMPACT CRATER</h3>';
-        html += '<p><strong>Crater Diameter:</strong> ' + data.crater.diameter.toFixed(2) + ' m</p>';
-        html += '<p><strong>Asteroid Diameter:</strong> ' + asteroid.diameter.toFixed(2) + ' m</p>';
-        html += '<p>Complete vaporization at ground zero. Crater forms from intense heat and pressure.</p>';
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="shockwave">';
-        html += '<h3>💥 SHOCKWAVE ZONE</h3>';
-        html += '<p><strong>Radius:</strong> ' + data.shockwave.radius.toFixed(2) + ' km</p>';
-        html += '<p>Extreme destruction and widespread fires. All structures obliterated by supersonic blast wave.</p>';
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="wind">';
-        html += '<h3>🌪️ WIND ZONE (≥60 km/h)</h3>';
-        html += '<p><strong>Radius:</strong> ' + data.wind.radius.toFixed(2) + ' km</p>';
-        html += '<p><strong>Wind Speed:</strong> ≥ ' + data.wind.speed + ' km/h</p>';
-        html += '<p>Outer boundary of destructive winds. Trees uprooted, windows shattered, light structures damaged.</p>';
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="strongSeismic">';
-        html += '<h3>🔴 STRONG SEISMIC ACTIVITY</h3>';
-        html += '<p><strong>Magnitude:</strong> ' + data.seismic.magnitude.toFixed(2) + '</p>';
-        html += '<p><strong>Radius:</strong> ' + data.seismic.strong.toFixed(2) + ' km</p>';
-        html += '<p><strong>Intensity:</strong> MMI VII+</p>';
-        html += '<p>Significant structural damage. Buildings collapse, ground cracks form, infrastructure fails.</p>';
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="moderateSeismic">';
-        html += '<h3>🟠 MODERATE SEISMIC ACTIVITY</h3>';
-        html += '<p><strong>Magnitude:</strong> ' + data.seismic.magnitude.toFixed(2) + '</p>';
-        html += '<p><strong>Radius:</strong> ' + data.seismic.moderate.toFixed(2) + ' km</p>';
-        html += '<p><strong>Intensity:</strong> MMI V-VI</p>';
-        html += '<p>Felt by everyone. Furniture shifts, weak structures damaged, chimneys collapse.</p>';
-        html += '</div>';
-
-        html += '<div class="impact-zone" data-zone="lightSeismic">';
-        html += '<h3>🟡 LIGHT SEISMIC ACTIVITY</h3>';
-        html += '<p><strong>Magnitude:</strong> ' + data.seismic.magnitude.toFixed(2) + '</p>';
-        html += '<p><strong>Radius:</strong> ' + data.seismic.light.toFixed(2) + ' km</p>';
-        html += '<p><strong>Intensity:</strong> MMI III-IV</p>';
-        html += '<p>Felt indoors by most. Hanging objects swing, slight vibrations, minor disturbances.</p>';
-        html += '</div>';
-
-        if (data.tsunami) {
-            html += '<div class="impact-zone" data-zone="tsunami">';
-            html += '<h3>🌊 TSUNAMI ZONE</h3>';
-            html += '<p><strong>Initial Wave Height:</strong> ' + data.tsunami.waveHeight.toFixed(2) + ' m</p>';
-            html += '<p><strong>Affected Radius:</strong> ' + data.tsunami.radius.toFixed(2) + ' km</p>';
-            html += '<p>Ocean impact generates massive tsunami. Coastal areas at extreme risk from wave surge.</p>';
-            html += '</div>';
-        }
-
-        sidebar.innerHTML = html;
-
-        // Scroll event handler to highlight zones
-        sidebar.addEventListener('scroll', handleSidebarScroll);
-
-        // Initial focus on crater
-        setTimeout(function() { focusZone('crater'); }, 100);
-    }
-
-    function handleSidebarScroll() {
-        var sidebar = document.getElementById('sidebar-content');
-        var zones = sidebar.querySelectorAll('.impact-zone');
-        var scrollTop = sidebar.scrollTop;
-        var sidebarHeight = sidebar.clientHeight;
-
-        var closestZone = null;
-        var minDistance = Infinity;
-
-        zones.forEach(function(zone) {
-            var rect = zone.getBoundingClientRect();
-            var sidebarRect = sidebar.getBoundingClientRect();
-            var zoneTop = rect.top - sidebarRect.top;
-            var zoneMiddle = zoneTop + (zone.offsetHeight / 2);
-            var viewMiddle = sidebarHeight / 2;
-            var distance = Math.abs(zoneMiddle - viewMiddle);
-
-            if (distance < minDistance) {
-                minDistance = distance;
-                closestZone = zone;
-            }
-        });
-
-        if (closestZone) {
-            var zoneName = closestZone.getAttribute('data-zone');
-            if (currentActiveZone !== zoneName) {
-                zones.forEach(z => z.classList.remove('active'));
-                closestZone.classList.add('active');
-                currentActiveZone = zoneName;
-                focusZone(zoneName, false);
-            }
-        }
-    }
-
-    function focusZone(zoneName, shouldScroll) {
-        if (shouldScroll === undefined) shouldScroll = true;
-
-        if (!impactLayers[zoneName]) return;
-
-        var layerInfo = impactLayers[zoneName];
-        var bounds = layerInfo.layer.getBounds();
-
-        // Fit map to show the zone
-        map.fitBounds(bounds, {padding: [50, 50], maxZoom: 15});
-
-        // Update sidebar highlighting
-        if (shouldScroll) {
-            var sidebar = document.getElementById('sidebar-content');
-            var zones = sidebar.querySelectorAll('.impact-zone');
-            zones.forEach(function(z) {
-                z.classList.remove('active');
-                if (z.getAttribute('data-zone') === zoneName) {
-                    z.classList.add('active');
-                    z.scrollIntoView({behavior: 'smooth', block: 'center'});
-                }
-            });
-        }
-
-        currentActiveZone = zoneName;
-    }
-
-    function resetToAsteroidList() {
-        // Remove all impact layers
-        for (var key in impactLayers) {
-            if (impactLayers[key].layer) {
-                map.removeLayer(impactLayers[key].layer);
-            }
-             if (impactLayers[key].label) {
-                map.removeLayer(impactLayers[key].label);
-            }
-        }
-        impactLayers = {};
-
-        // Reset map view
-        map.setView([20, 0], 2);
-
-        // Restore sidebar
-        var sidebar = document.getElementById('sidebar-content');
-        var html = '<h2>Hazardous Meteor Impacts</h2>';
-        html += '<div class="status-text" id="status-text">Found ' + allAsteroids.length + ' hazardous asteroids.</div>';
-        html += '<div id="asteroid-list">';
-
-        allAsteroids.forEach(function(ast) {
-            var massText = formatMassMT(ast.mass_kg);
-            var velocityText = (ast.velocity_kmh !== undefined && ast.velocity_kmh !== null) ? Number(ast.velocity_kmh).toLocaleString(undefined, {maximumFractionDigits: 0}) + ' km/h' : 'N/A';
-            html += '<div class="asteroid-item" data-name="' + ast.name + '" data-diameter="' + ast.diameter + '" data-mass="' + ast.mass_kg + '" data-velocity="' + ast.velocity_kmh + '">';
-            html += '<div><strong>' + ast.name + '</strong></div>';
-            html += '<div>Diameter: ' + ast.diameter.toFixed(2) + ' m</div>';
-            html += '<div>Mass: ' + massText + '</div>';
-            html += '<div>Velocity: ' + velocityText + '</div>';
-            html += '<div>Miss Dist: ' + (ast.miss_distance_km / 1000).toFixed(0) + 'k km</div>';
-            html += '<div>Date: ' + ast.date + '</div>';
-            html += '<span class="hazard-badge">HAZARDOUS</span></div>';
-        });
-
-        html += '</div>';
-        html += '<button class="impact-button" id="impact-btn" disabled>SIMULATE IMPACT</button>';
-        html += '<div class="info-text">1. Select asteroid<br>2. Click map to place target<br>3. SIMULATE IMPACT</div>';
-
-        sidebar.innerHTML = html;
-        sidebar.removeEventListener('scroll', handleSidebarScroll);
-
-        // Reset selections
-        selectedAsteroid = null;
-        waypointLocation = null;
-        currentActiveZone = null;
-
-        // Reattach event listeners after HTML replacement
-        reattachAsteroidListEvents();
-    }
     </script>
     """
 
     m.get_root().html.add_child(folium.Element(custom_html))
     return m._repr_html_()
+
+
+# --- Calculate casualties endpoint ---
+@app.route('/calculate_casualties', methods=['POST'])
+def calculate_casualties():
+    """Calculate impact casualties using GPW v4 population data."""
+    data = request.json
+    lat = data['lat']
+    lon = data['lon']
+    diameter = data['diameter']
+    mass_kg = data['mass_kg']
+    velocity_kmh = data['velocity_kmh']
+
+    casualties = calculate_impact_casualties(lat, lon, diameter, mass_kg, velocity_kmh)
+    return jsonify(casualties)
 
 
 # --- Stream asteroids via SSE ---
