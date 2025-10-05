@@ -12,21 +12,34 @@ import math
 import rasterio
 from rasterio.transform import rowcol
 import numpy as np
-import os
 import urllib.request
 
 # Download population data if not exists
+import os
+import gdown
+
+# Download population data if not exists
 TIF_FILE = "gpw_v4_population_count_rev11_2020_30_sec.tif"
-GDRIVE_LINK = "https://drive.google.com/uc?export=download&id=1RulG4qIXOryaXR2vKUt0P2DyFhCy07Nk"
+GDRIVE_FILE_ID = "1RulG4qIXOryaXR2vKUt0P2DyFhCy07Nk"  # Just the ID, not the full URL
 
 if not os.path.exists(TIF_FILE):
     print("Downloading population data from Google Drive...")
     try:
-        urllib.request.urlretrieve(GDRIVE_LINK, TIF_FILE)
+        url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+        gdown.download(url, TIF_FILE, quiet=False)
         print("Download complete!")
     except Exception as e:
         print(f"Error downloading file: {e}")
-        print("Please ensure the Google Drive link is correct and file is publicly accessible")
+        raise
+
+# Verify file was downloaded correctly
+if os.path.exists(TIF_FILE):
+    file_size = os.path.getsize(TIF_FILE)
+    print(f"TIF file size: {file_size / (1024*1024):.2f} MB")
+    if file_size < 1000:  # If less than 1KB, it's probably an error page
+        print("ERROR: Downloaded file is too small - likely an HTML error page")
+        os.remove(TIF_FILE)
+        raise Exception("Failed to download valid TIF file from Google Drive")
 
 dataset = rasterio.open(TIF_FILE)
 
