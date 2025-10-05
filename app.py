@@ -12,8 +12,23 @@ import math
 import rasterio
 from rasterio.transform import rowcol
 import numpy as np
+import os
+import urllib.request
 
-dataset = rasterio.open("../data/gpw_v4_population_count_rev11_2020_30_sec.tif")
+# Download population data if not exists
+TIF_FILE = "gpw_v4_population_count_rev11_2020_30_sec.tif"
+GDRIVE_LINK = "https://drive.google.com/uc?export=download&id=1RulG4qIXOryaXR2vKUt0P2DyFhCy07Nk"
+
+if not os.path.exists(TIF_FILE):
+    print("Downloading population data from Google Drive...")
+    try:
+        urllib.request.urlretrieve(GDRIVE_LINK, TIF_FILE)
+        print("Download complete!")
+    except Exception as e:
+        print(f"Error downloading file: {e}")
+        print("Please ensure the Google Drive link is correct and file is publicly accessible")
+
+dataset = rasterio.open(TIF_FILE)
 
 load_dotenv()
 
